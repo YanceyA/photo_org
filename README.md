@@ -27,7 +27,9 @@ content, preserves folder/filename context as XMP metadata, and logs every actio
 uv run photoflow scan  "D:/OldLaptopDump" "E:/PhoneBackup"
 uv run photoflow plan
 uv run photoflow review               # only if plan queued near-dupe groups
-# ... open photoflow_work/review.html, edit photoflow_work/decisions.csv ...
+# ... open photoflow_work/review.html in Chrome/Edge, click Keep on the photos
+#     to keep, then "Save decisions.csv" (other browsers download the CSV;
+#     hand-editing photoflow_work/decisions.csv still works) ...
 uv run photoflow apply --out "D:/Photos-Organized" [--dry-run]
 uv run photoflow status
 ```
@@ -52,9 +54,11 @@ duplicates. Re-running any step is safe (idempotent).
   dupes) keep one copy; all duplicate source paths are recorded into the
   keeper's metadata so no folder context is lost.
 - **Near-dupe review, never auto-delete** — perceptual hash (pHash, hamming
-  distance <= 5 via a BK-tree) flags resized/re-encoded lookalikes into
-  `review.html` + `decisions.csv`. You set `keep`/`skip` per row; blanks stay
-  held. Decisions survive regeneration.
+  distance <= 5 via a BK-tree) flags resized/re-encoded lookalikes into an
+  interactive `review.html`: click Keep on the photo(s) to keep (the rest
+  skip), then save straight back to `decisions.csv`. Untouched groups stay
+  held; the CSV remains the source of truth, so hand-editing it still works.
+  Decisions survive regeneration.
 - **Bursts kept** — lookalike groups where every frame has EXIF time from the
   same camera within 10 s are treated as unique and kept silently.
 - **RAW+JPEG pairs** — same stem in the same folder: both kept, tagged as a pair.

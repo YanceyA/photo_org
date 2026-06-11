@@ -39,8 +39,8 @@ HANDOFF.md §2 is the full list — preserve these in any change. The most viola
 
 `src/photoflow/`:
 
-- **`cli.py`** — argparse dispatcher; opens the DB, starts a run, and calls the command module. All five command modules (`scan.py`, `planner.py`, `review.py`, `apply.py`, `status.py`) share the signature `(conn, workdir, run_id, log_fh, args, cfg)`.
-- **Pure logic** — `dates.py` (resolution cascade), `naming.py` (slug + dest scheme), `bktree.py`, `hashing.py`. No I/O beyond the file being hashed; testable without exiftool.
+- **`cli.py`** — argparse dispatcher; opens the DB, starts a run, and calls the command module. All five command modules (`scan.py`, `planner.py`, `review.py`, `apply.py`, `status.py`) share the signature `(conn, workdir, run_id, log_fh, args, cfg)`. `review.py` orchestrates decisions.csv + thumbnails + the interactive review.html (logic in `review_page.py`).
+- **Pure logic** — `dates.py` (resolution cascade), `naming.py` (slug + dest scheme), `bktree.py`, `hashing.py`, `review_page.py` (decisions.csv rows, JSON payload + HTML/JS template for the interactive review page). No I/O beyond the file being hashed; testable without exiftool.
 - **Infra** — `db.py`, `audit.py`, `exiftool.py`, `xmp.py`.
 - **`config.py`** — frozen `Config` dataclass with defaults + `photoflow.toml` loader (unknown keys are fatal).
 - **`models.py`** — role/status vocabularies.
