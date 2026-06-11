@@ -22,9 +22,9 @@ class TestContentHash:
         a.write_bytes(b"hello world" * 1000)
         b.write_bytes(b"hello world" * 1000 + b"!")
         ha = content_hash(a)
-        assert ha == content_hash(a)          # deterministic
-        assert ha != content_hash(b)          # content-sensitive
-        assert len(ha) == 40                  # blake2b digest_size=20 -> 40 hex chars
+        assert ha == content_hash(a)  # deterministic
+        assert ha != content_hash(b)  # content-sensitive
+        assert len(ha) == 40  # blake2b digest_size=20 -> 40 hex chars
 
 
 class TestBKTree:
@@ -42,7 +42,7 @@ class TestBKTree:
             t.add(h)
         hits = set(t.query(0b0000, 2))
         assert 0b0000 in hits and 0b0001 in hits
-        assert 0b0111 not in hits          # distance 3 > radius 2
+        assert 0b0111 not in hits  # distance 3 > radius 2
         assert 0b1111111 not in hits
 
     def test_duplicate_add_is_noop(self):

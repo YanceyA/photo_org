@@ -14,8 +14,13 @@ class TestSlugify:
         assert slugify("???") == "img"
 
 
-def _row(content_hash="deadbeefcafe", source_path="C:/src/Beach Day.jpg",
-         ext=".jpg", date_taken=None, date_source="none"):
+def _row(
+    content_hash="deadbeefcafe",
+    source_path="C:/src/Beach Day.jpg",
+    ext=".jpg",
+    date_taken=None,
+    date_source="none",
+):
     return {
         "content_hash": content_hash,
         "source_path": source_path,

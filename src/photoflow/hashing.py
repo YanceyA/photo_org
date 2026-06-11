@@ -9,18 +9,21 @@ from photoflow.bktree import hamming  # noqa: F401
 
 try:
     from PIL import Image
+
     HAVE_PIL = True
 except ImportError:
     HAVE_PIL = False
 
 try:
     import imagehash
+
     HAVE_IMAGEHASH = HAVE_PIL
 except ImportError:
     HAVE_IMAGEHASH = False
 
 try:
     import pillow_heif
+
     pillow_heif.register_heif_opener()
     HAVE_HEIF = True
 except ImportError:
