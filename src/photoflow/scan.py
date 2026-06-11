@@ -95,26 +95,32 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
 
     # perceptual hashes (images only)
     if HAVE_IMAGEHASH:
-        rows = (
-            conn.execute(
-                "SELECT id, source_path FROM files WHERE kind='image' AND phash IS NULL "  # noqa: UP031
-                "AND status='scanned' AND source_path IN (%s)" % ",".join("?" * len(new_paths)),
-                new_paths,
-            ).fetchall()
-            if new_paths
-            else []
-        )
-        for n, r in enumerate(rows, 1):
-            ph = perceptual_hash(Path(r["source_path"]))
-            if ph:
-                conn.execute("UPDATE files SET phash=? WHERE id=?", (ph, r["id"]))
-            if n % 500 == 0:
-                print(f"  phashed {n}/{len(rows)}")
-                conn.commit()
-        conn.commit()
+        phash_pending_images(conn)
 
     for sp in new_paths:
         row = conn.execute("SELECT id FROM files WHERE source_path=?", (sp,)).fetchone()
         log_action(conn, log_fh, run_id, row["id"], "scanned", sp)
     conn.commit()
     print("scan complete. Next: python photoflow.py plan")
+
+
+def phash_pending_images(conn):
+    """Hash every scanned image still missing a phash.
+
+    Candidacy is read from the manifest rather than this run's path list: an
+    IN(<paths>) clause overflows SQLite's 32766-variable cap on large imports,
+    and manifest-driven selection lets an interrupted scan resume here (and
+    backfills images scanned before ImageHash/pillow-heif were installed).
+    """
+    rows = conn.execute(
+        "SELECT id, source_path FROM files "
+        "WHERE kind='image' AND phash IS NULL AND status='scanned'"
+    ).fetchall()
+    for n, r in enumerate(rows, 1):
+        ph = perceptual_hash(Path(r["source_path"]))
+        if ph:
+            conn.execute("UPDATE files SET phash=? WHERE id=?", (ph, r["id"]))
+        if n % 500 == 0:
+            print(f"  phashed {n}/{len(rows)}")
+            conn.commit()
+    conn.commit()
