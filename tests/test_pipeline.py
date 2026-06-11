@@ -39,6 +39,7 @@ def test_full_pipeline(photo_fixture: Path, tmp_path: Path):
 
     # ---- 2. review -> fill decisions -> apply
     pf(work, "review")
+    assert (work / "review.html").exists()
     dec = work / "decisions.csv"
     with open(dec, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))

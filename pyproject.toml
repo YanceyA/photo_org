@@ -41,5 +41,5 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
-# verbatim XMP packet template copied from _reference.py; line length is load-bearing
+# load-bearing line in the XMP packet template (verbatim from the deleted reference implementation)
 "src/photoflow/xmp.py" = ["E501"]

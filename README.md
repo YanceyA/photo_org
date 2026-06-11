@@ -10,32 +10,37 @@ content, preserves folder/filename context as XMP metadata, and logs every actio
 
 1. Python 3.11+ (`python --version`)
 2. ExifTool on PATH:
-   - Windows: `winget install ExifTool.ExifTool` (or download from exiftool.org —
+   - Windows: `winget install OliverBetz.ExifTool` (or download from exiftool.org —
      rename `exiftool(-k).exe` to `exiftool.exe` and put it on PATH)
    - macOS: `brew install exiftool`
    - Linux: `apt install libimage-exiftool-perl`
-3. Python deps: `pip install Pillow ImageHash pillow-heif`
-   - All optional, but without Pillow/ImageHash you lose near-dupe flagging and
-     review thumbnails (exact dedupe still works). pillow-heif enables HEIC
-     thumbnails/phash for iPhone photos.
+3. Python deps: `uv sync` (installs the package plus dev/image deps). Without uv:
+   `pip install -e .[images]` for the optional image extras.
+   - The image extras (Pillow/ImageHash/pillow-heif) are optional, but without
+     Pillow/ImageHash you lose near-dupe flagging and review thumbnails (exact
+     dedupe still works). pillow-heif enables HEIC thumbnails/phash for iPhone
+     photos.
 
 ## Workflow
 
 ```
-python photoflow.py scan  "D:/OldLaptopDump" "E:/PhoneBackup"
-python photoflow.py plan
-python photoflow.py review            # only if plan queued near-dupe groups
+uv run photoflow scan  "D:/OldLaptopDump" "E:/PhoneBackup"
+uv run photoflow plan
+uv run photoflow review               # only if plan queued near-dupe groups
 # ... open photoflow_work/review.html, edit photoflow_work/decisions.csv ...
-python photoflow.py apply --out "D:/Photos-Organized" [--dry-run]
-python photoflow.py status
+uv run photoflow apply --out "D:/Photos-Organized" [--dry-run]
+uv run photoflow status
 ```
+
+(`python -m photoflow <cmd>` works too if the package is installed in your
+active environment.)
 
 Later, when you find another USB stick:
 
 ```
-python photoflow.py scan "F:/USB2009"
-python photoflow.py plan
-python photoflow.py apply --out "D:/Photos-Organized"
+uv run photoflow scan "F:/USB2009"
+uv run photoflow plan
+uv run photoflow apply --out "D:/Photos-Organized"
 ```
 
 Only content not already in the library gets copied; the rest is logged as
@@ -82,13 +87,22 @@ perceptual matching, per your "no resized videos" assumption)
 
 ## Tuning
 
-Constants at the top of `photoflow.py`:
+Drop a `photoflow.toml` in the workdir to override defaults:
 
-- `NEAR_DUPE_THRESHOLD` (5) — raise to catch more aggressive re-encodes/crops
+```toml
+near_dupe_threshold = 8
+burst_window_s = 5
+min_year = 1985
+```
+
+- `near_dupe_threshold` (5) — raise to catch more aggressive re-encodes/crops
   in review, lower if too many false neighbors are queued.
-- `BURST_WINDOW_S` (10) — max gap between burst frames.
-- `MIN_YEAR` (1990) — dates before this are treated as bogus.
-- `SLUG_MAX` (40) — original-filename portion kept in new names.
+- `burst_window_s` (10) — max gap between burst frames.
+- `min_year` (1990) — dates before this are treated as bogus.
+- `slug_max` (40) — original-filename portion kept in new names.
+- `exiftool_batch` (200) — files per exiftool invocation.
+- `image_ext` / `raw_ext` / `video_ext` / `sidecar_ext` — the extension sets
+  listed above.
 
 ## Performance notes (tens of thousands of files)
 
@@ -106,10 +120,24 @@ already fingerprinted (matched by path+size+mtime).
 - `decisions.csv` blanks = held, not deleted. Nothing is ever deleted —
   "skip" just means "not copied into the organized library."
 
+## Development
+
+```
+uv sync            # install package + dev deps
+just test          # uv run pytest
+just lint          # uv run ruff check src tests
+just fmt           # uv run ruff format src tests
+```
+
+pre-commit is available (`uv run pre-commit install`). The integration suite
+needs exiftool on PATH; pure-logic tests (dates, naming, bktree, hashing) run
+without it and the exiftool-dependent tests skip when it's absent.
+
 ## Later: Proxmox / viewer path
 
-The manifest + pipeline are portable: move `photoflow.py` and the workdir into
-an LXC, point it at an SMB/NFS share, and it behaves identically. The natural
+The manifest + pipeline are portable: install the package (or copy the repo)
+and move the workdir into an LXC, point it at an SMB/NFS share, and it behaves
+identically. The natural
 next step for viewing is an Immich LXC pointed at the organized library as an
 external/read-only source — it indexes the XMP keywords/descriptions this
 pipeline writes and layers ML tagging, faces, and search on top without owning
