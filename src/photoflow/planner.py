@@ -119,7 +119,7 @@ def cmd_plan(conn, workdir, run_id, log_fh, args):
                 times.sort()
                 is_burst = all(
                     (b - a) <= timedelta(seconds=BURST_WINDOW_S)
-                    for a, b in zip(times, times[1:], strict=False)
+                    for a, b in zip(times, times[1:])  # noqa: B905 (verbatim from reference)
                 )
             gid = next_group()
             for m in members:
