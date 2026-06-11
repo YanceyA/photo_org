@@ -35,7 +35,7 @@ def test_full_pipeline(photo_fixture: Path, tmp_path: Path):
     }
     assert date_sources.get("filename") == 1  # IMG_20190304_101112.jpg
     assert date_sources.get("folder") >= 1  # no_meta.png
-    assert date_sources.get("exif") >= 4  # beach + dupe + bursts
+    assert date_sources.get("exif") == 5  # beach + copy + 3 bursts
 
     # ---- 2. review -> fill decisions -> apply
     pf(work, "review")
@@ -62,6 +62,7 @@ def test_full_pipeline(photo_fixture: Path, tmp_path: Path):
     # slugify maps "sunset_small" -> "sunset-small" in dest names
     assert not any("sunset-small" in f for f in files)
     assert any("sunset-big" in f for f in files)
+    assert any(f.startswith(str(Path("2015"))) and "no-meta" in f for f in files)  # folder-date PNG
 
     # XMP description on beach keeper carries BOTH source rel-paths
     beach_path = lib / beach_dests[0]

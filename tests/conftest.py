@@ -11,12 +11,16 @@ from PIL import Image
 
 def pf(workdir: Path, *args: str) -> subprocess.CompletedProcess:
     """Run photoflow as a subprocess against the given workdir."""
-    return subprocess.run(
+    proc = subprocess.run(
         [sys.executable, "-m", "photoflow", "--workdir", str(workdir), *args],
         capture_output=True,
         text=True,
-        check=True,
     )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"photoflow {' '.join(args)} failed ({proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+        )
+    return proc
 
 
 def q(workdir: Path, sql: str, *params):
