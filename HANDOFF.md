@@ -179,6 +179,12 @@ prototype — no binary assets in the repo, generate with Pillow:
   editing surface.
 - Fake RAW files in tests must not be byte-identical to their JPEG.
 - exiftool JSON output may omit requested tags; all reads must `.get()`.
+- **Fixed bug (Windows):** exiftool emits forward-slash `SourceFile` paths even
+  on Windows, so keying the batch-read result by the raw string made every
+  lookup miss — EXIF dates/camera/dimensions silently dropped for all files
+  (bursts demoted to review, EXIF naming never fired). The reference single
+  file has this bug; the package's `exiftool_json` normalizes keys via
+  `str(Path(...))` (no-op on POSIX). Keep the normalization.
 - Date strings are parsed defensively (regex, year sanity window) — EXIF in
   the wild contains `0000:00:00`, timezone suffixes, and garbage.
 
