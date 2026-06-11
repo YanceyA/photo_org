@@ -9,7 +9,13 @@ dependencies = []
 images = ["Pillow", "ImageHash", "pillow-heif"]
 
 [dependency-groups]
-dev = ["pytest", "ruff", "Pillow", "ImageHash"]
+dev = [
+    "pytest",
+    "ruff",
+    "Pillow",
+    "ImageHash",
+    "pre-commit>=4.6.0",
+]
 
 [project.scripts]
 photoflow = "photoflow.cli:main"
