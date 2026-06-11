@@ -172,6 +172,9 @@ wheels = [
 name = "photoflow"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "pillow-heif" },
+]
 
 [package.optional-dependencies]
 images = [
@@ -193,6 +196,7 @@ dev = [
 requires-dist = [
     { name = "imagehash", marker = "extra == 'images'" },
     { name = "pillow", marker = "extra == 'images'" },
+    { name = "pillow-heif", specifier = ">=1.4.0" },
     { name = "pillow-heif", marker = "extra == 'images'" },
 ]
 provides-extras = ["images"]
