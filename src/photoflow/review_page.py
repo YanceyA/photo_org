@@ -7,6 +7,7 @@ and writes the returned strings. Testable without exiftool or Pillow.
 from __future__ import annotations
 
 import csv
+from pathlib import Path
 
 CSV_COLUMNS = [
     "group_id",
@@ -52,3 +53,52 @@ def write_decisions_csv(path, rows: list[dict]) -> None:
         w = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         w.writeheader()
         w.writerows(rows)
+
+
+def _file_uri(p: str) -> str | None:
+    try:
+        return Path(p).as_uri()
+    except ValueError:
+        return None
+
+
+def build_payload(groups, rows: list[dict], workdir_key: str, thumbs_ok: set) -> dict:
+    """Everything the in-page JS needs: display fields, group-best flags, and the
+    exact CSV cell values so the browser can re-serialize a byte-compatible CSV."""
+    by_id = {r["file_id"]: r for r in rows}
+    out = []
+    for gid, members in groups.items():
+        best_id = suggested_keeper_id(members)
+        max_px = max((m["width"] or 0) * (m["height"] or 0) for m in members)
+        max_size = max((m["size"] or 0) for m in members)
+        files = []
+        for m in members:
+            r = by_id[m["id"]]
+            px = (m["width"] or 0) * (m["height"] or 0)
+            files.append(
+                {
+                    "id": m["id"],
+                    "path": m["source_path"],
+                    "uri": _file_uri(m["source_path"]),
+                    "thumb": f"thumbs/{m['id']}.jpg" if m["id"] in thumbs_ok else None,
+                    "w": m["width"],
+                    "h": m["height"],
+                    "size": m["size"] or 0,
+                    "ext": m["ext"],
+                    "kind": m["kind"],
+                    "camera": m["camera"],
+                    "date": m["date_taken"],
+                    "suggested": m["id"] == best_id,
+                    "bestRes": px == max_px and px > 0,
+                    "bestSize": (m["size"] or 0) == max_size and max_size > 0,
+                    "csv": {
+                        "resolution": r["resolution"],
+                        "size_kb": r["size_kb"],
+                        "suggestion": r["suggestion"],
+                    },
+                    "decision": r["decision"],
+                    "merge": str(r["merge_from_file_id"] or ""),
+                }
+            )
+        out.append({"gid": gid, "files": files})
+    return {"workdir": workdir_key, "groups": out}
