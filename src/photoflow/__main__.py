@@ -1,3 +1,4 @@
-from photoflow._reference import main
+from photoflow.cli import main
 
-main()
+if __name__ == "__main__":
+    raise SystemExit(main())
