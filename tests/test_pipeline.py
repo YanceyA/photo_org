@@ -2,33 +2,13 @@
 
 import csv
 import shutil
-import sqlite3
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
-from conftest import _gradient
+from conftest import _gradient, pf, q
 
 pytestmark = pytest.mark.exiftool
-
-
-def pf(workdir: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, "-m", "photoflow", "--workdir", str(workdir), *args],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-
-
-def q(workdir: Path, sql: str, *params):
-    conn = sqlite3.connect(workdir / "photoflow.db")
-    conn.row_factory = sqlite3.Row
-    try:
-        return conn.execute(sql, params).fetchall()
-    finally:
-        conn.close()
 
 
 def tree(root: Path) -> set[str]:

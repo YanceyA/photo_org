@@ -1,10 +1,32 @@
 import random
 import shutil
+import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from PIL import Image
+
+
+def pf(workdir: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run photoflow as a subprocess against the given workdir."""
+    return subprocess.run(
+        [sys.executable, "-m", "photoflow", "--workdir", str(workdir), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def q(workdir: Path, sql: str, *params):
+    """Query the manifest db, returning sqlite3.Row results."""
+    conn = sqlite3.connect(workdir / "photoflow.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
 
 
 def pytest_collection_modifyitems(config, items):
