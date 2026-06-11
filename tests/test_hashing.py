@@ -1,7 +1,9 @@
 from pathlib import Path
 
+from PIL import Image
+
 from photoflow.bktree import BKTree
-from photoflow.hashing import content_hash, hamming
+from photoflow.hashing import content_hash, hamming, perceptual_hash
 
 
 class TestHamming:
@@ -25,6 +27,26 @@ class TestContentHash:
         assert ha == content_hash(a)  # deterministic
         assert ha != content_hash(b)  # content-sensitive
         assert len(ha) == 40  # blake2b digest_size=20 -> 40 hex chars
+
+
+class TestPerceptualHash:
+    def test_stable_hex_for_image(self, tmp_path: Path):
+        p = tmp_path / "img.jpg"
+        img = Image.new("RGB", (64, 64))
+        px = img.load()
+        for x in range(64):
+            for y in range(64):
+                px[x, y] = (x * 4, y * 4, 128)
+        img.save(p, "JPEG")
+        h = perceptual_hash(p)
+        assert h is not None and len(h) == 16
+        assert int(h, 16) >= 0  # valid hex
+        assert perceptual_hash(p) == h  # deterministic
+
+    def test_unreadable_returns_none(self, tmp_path: Path):
+        p = tmp_path / "not_an_image.jpg"
+        p.write_text("hello")
+        assert perceptual_hash(p) is None
 
 
 class TestBKTree:

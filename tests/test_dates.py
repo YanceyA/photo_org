@@ -57,7 +57,7 @@ class TestDateFromFilename:
 
     def test_invalid_compact_falls_through(self):
         # compact match with invalid date must not raise
-        assert date_from_filename("99999999_999999.jpg") is None
+        assert date_from_filename("IMG_20191399_251199.jpg") is None
 
 
 class TestYearFromFolder:
