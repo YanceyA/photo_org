@@ -10,7 +10,7 @@ EMBED_EXT = {".jpg", ".jpeg", ".tif", ".tiff", ".png", ".heic", ".heif"}
 
 def xmp_sidecar(dest: Path, description: str, keywords: list[str]):
     kw = "".join(f"<rdf:li>{html.escape(k)}</rdf:li>" for k in keywords)
-    xml = f"""<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+    xml = f"""<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
   <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/">

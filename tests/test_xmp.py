@@ -3,7 +3,18 @@ from pathlib import Path
 
 import pytest
 
-from photoflow.xmp import xmp_sidecar
+from photoflow.xmp import embed_args, xmp_sidecar
+
+
+def test_embed_args_exact_lines():
+    assert embed_args("d.jpg", "desc", ["k1", "k2"]) == [
+        "-overwrite_original",
+        "-XMP-dc:Description=desc",
+        "-XMP-dc:Subject=k1",
+        "-XMP-dc:Subject=k2",
+        "d.jpg",
+        "-execute",
+    ]
 
 
 def test_sidecar_path_and_content(tmp_path: Path):
