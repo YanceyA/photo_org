@@ -240,7 +240,8 @@ function build() {
         '<div class="stats"><span class="' + (f.bestRes ? "hl" : "") + '">' +
         esc(f.w || "?") + "\\u00d7" + esc(f.h || "?") + " \\u00b7 " + fmtMp(f) +
         '</span> \\u00b7 <span class="' + (f.bestSize ? "hl" : "") + '">' +
-        fmtSize(f.size) + "</span> \\u00b7 " + esc((f.ext || "").toUpperCase()) + badge +
+        fmtSize(f.size) + "</span> \\u00b7 " +
+        esc((f.ext || "").replace(/^\\./, "").toUpperCase()) + badge +
         '</div><div class="meta">' + esc(f.camera || "unknown camera") + " \\u00b7 " +
         esc(f.date || "no date") + '</div><div class="path">' + esc(f.path) + "</div>" +
         '<div class="actions">' +
