@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 from photoflow.config import EXIFTOOL_BATCH
 
@@ -47,7 +48,12 @@ def exiftool_json(paths: list[str]) -> dict[str, dict]:
             )
             if res.stdout.strip():
                 for rec in json.loads(res.stdout):
-                    out[rec.get("SourceFile", "")] = rec
+                    # exiftool emits SourceFile with forward slashes even on
+                    # Windows; normalize to the OS-native form so callers can
+                    # look records up by the paths they passed in. (Without
+                    # this, EXIF silently never lands in the manifest on
+                    # Windows - latent bug inherited from the prototype.)
+                    out[str(Path(rec.get("SourceFile", "")))] = rec
         except (json.JSONDecodeError, OSError) as e:
             print(f"  exiftool batch failed: {e}", file=sys.stderr)
         finally:
