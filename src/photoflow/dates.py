@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-MIN_YEAR, MAX_YEAR = 1990, datetime.now().year + 1
+from photoflow.config import MAX_YEAR, MIN_YEAR
 
 EXIF_DATE_RE = re.compile(r"(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})")
 FNAME_FULL_RE = re.compile(r"((?:19|20)\d{2})(\d{2})(\d{2})[_\-. ]?(\d{2})(\d{2})(\d{2})")

@@ -70,8 +70,9 @@ def open_db(workdir: Path) -> sqlite3.Connection:
 
 
 def new_run(conn, command, args) -> int:
-    cur = conn.execute("INSERT INTO runs(started, command, args) VALUES (?,?,?)",
-                       (datetime.now().isoformat(timespec="seconds"), command,
-                        json.dumps(args)))
+    cur = conn.execute(
+        "INSERT INTO runs(started, command, args) VALUES (?,?,?)",
+        (datetime.now().isoformat(timespec="seconds"), command, json.dumps(args)),
+    )
     conn.commit()
     return cur.lastrowid

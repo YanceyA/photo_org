@@ -5,8 +5,7 @@ from photoflow.db import SCHEMA_VERSION, new_run, open_db
 
 def test_open_db_creates_tables(tmp_path: Path):
     conn = open_db(tmp_path)
-    names = {r["name"] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
+    names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"files", "runs", "actions", "schema_version"} <= names
 
 

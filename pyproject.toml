@@ -34,3 +34,7 @@ extend-exclude = ["src/photoflow/_reference.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# verbatim XMP packet template copied from _reference.py; line length is load-bearing
+"src/photoflow/xmp.py" = ["E501"]

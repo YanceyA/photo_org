@@ -14,8 +14,12 @@ def test_log_action_writes_table_and_jsonl(tmp_path: Path):
     conn.commit()
 
     row = conn.execute("SELECT * FROM actions").fetchone()
-    assert (row["run_id"], row["file_id"], row["action"], row["detail"]) == \
-        (run_id, 7, "copied", "a -> b")
+    assert (row["run_id"], row["file_id"], row["action"], row["detail"]) == (
+        run_id,
+        7,
+        "copied",
+        "a -> b",
+    )
 
     rec = json.loads(fh.getvalue())
     assert rec["action"] == "copied" and rec["file_id"] == 7 and rec["run"] == run_id

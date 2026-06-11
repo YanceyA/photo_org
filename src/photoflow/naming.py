@@ -6,7 +6,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-SLUG_MAX = 40
+from photoflow.config import SLUG_MAX
 
 
 def slugify(stem: str) -> str:

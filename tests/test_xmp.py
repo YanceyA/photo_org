@@ -24,7 +24,15 @@ def test_sidecar_parses_with_exiftool(tmp_path: Path):
     dest.touch()
     xmp_sidecar(dest, "desc here", ["kw1"])
     out = subprocess.run(
-        ["exiftool", "-j", "-XMP-dc:Description", "-XMP-dc:Subject",
-         str(tmp_path / "photo.dng.xmp")],
-        capture_output=True, text=True, check=True)
+        [
+            "exiftool",
+            "-j",
+            "-XMP-dc:Description",
+            "-XMP-dc:Subject",
+            str(tmp_path / "photo.dng.xmp"),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     assert "desc here" in out.stdout and "kw1" in out.stdout
