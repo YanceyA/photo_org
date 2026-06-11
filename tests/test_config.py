@@ -21,7 +21,8 @@ def test_load_missing_file_gives_defaults(tmp_path: Path):
 
 def test_toml_overrides(tmp_path: Path):
     (tmp_path / "photoflow.toml").write_text(
-        "near_dupe_threshold = 8\nburst_window_s = 4\n", encoding="utf-8")
+        "near_dupe_threshold = 8\nburst_window_s = 4\n", encoding="utf-8"
+    )
     c = load_config(tmp_path)
     assert c.near_dupe_threshold == 8
     assert c.burst_window_s == 4
