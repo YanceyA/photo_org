@@ -189,7 +189,6 @@ def test_payload_marks_best_suggested_and_decisions():
     assert f1["decision"] == "keep" and f1["merge"] == "2"
     assert f2["decision"] == "" and f2["merge"] == ""
     assert f1["thumb"] == "thumbs/1.jpg" and f2["thumb"] is None
-    assert f1["uri"].startswith("file:///")
     assert f1["w"] == 4000 and f1["size"] == 2_000_000
     assert f1["ext"] == "jpg" and f1["kind"] == "image"
     assert f1["camera"] == "X100" and f1["date"] == "2024:01:01 10:00:00"
@@ -202,6 +201,13 @@ def test_payload_relative_path_gets_no_uri():
     rows = decision_rows(groups, {})
     p = build_payload(groups, rows, "w", thumbs_ok=set())
     assert p["groups"][0]["files"][0]["uri"] is None
+
+
+def test_payload_absolute_path_gets_uri(tmp_path):
+    groups = {1: [g(id=5, source_path=str(tmp_path / "a.jpg"))]}
+    rows = decision_rows(groups, {})
+    p = build_payload(groups, rows, "w", thumbs_ok=set())
+    assert p["groups"][0]["files"][0]["uri"].startswith("file://")
 ```
 
 **Step 2: Run to verify failure**
