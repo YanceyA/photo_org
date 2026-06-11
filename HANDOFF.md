@@ -65,6 +65,7 @@ photoflow/
 │   ├── config.py             # Config dataclass + photoflow.toml loader (tomllib)
 │   ├── db.py                 # schema, open_db, migrations, run/action helpers
 │   ├── models.py             # FileRecord dataclass, Role/Status/Kind enums
+│   ├── naming.py             # slugify + dest_for (pure)
 │   ├── hashing.py            # content_hash (blake2b), perceptual_hash, hamming
 │   ├── bktree.py             # BKTree (pure, unit-testable)
 │   ├── exiftool.py           # subprocess wrapper: batch read (-j argfile),
@@ -74,7 +75,7 @@ photoflow/
 │   ├── planner.py            # exact groups, raw/jpeg + live pairs,
 │   │                         #   near-dupe components, burst test, role writes
 │   ├── review.py             # decisions.csv (carry-forward) + review.html + thumbs
-│   ├── apply.py              # dest_for, copy, provenance, decisions consumption
+│   ├── apply.py              # copy, provenance, decisions consumption
 │   ├── xmp.py                # sidecar XML builder + embed-arg builder
 │   └── audit.py              # JSONL + actions-table logging
 └── tests/
