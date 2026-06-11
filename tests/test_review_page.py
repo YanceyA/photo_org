@@ -108,6 +108,22 @@ def test_render_page_embeds_parseable_json():
     assert json.loads(_extract_data(html_text)) == payload
 
 
+def test_render_page_contains_state_hardening():
+    """Pins the JS-side hardening: storage failure tolerance, save retry,
+    stale-overlay cleanup, decision normalization, and attribute-safe esc()."""
+    rows = decision_rows(GROUPS, {})
+    payload = build_payload(GROUPS, rows, "C:/work", set())
+    page = render_page(payload)
+    assert "localStorage.removeItem(LSKEY)" in page  # successful save clears the overlay
+    assert "function norm(" in page  # decision vocabulary normalized on load
+    assert "storage blocked" in page  # persist() warns instead of throwing
+    assert "fileHandle = null;" in page  # failed save re-prompts the picker
+    assert "if (saving) return;" in page  # concurrent save guard
+    assert '.replace(/"/g, "&quot;")' in page  # esc() safe in double-quoted attributes
+    assert 'alt=""' in page  # thumbs get alt; anchor only rendered when uri exists
+    assert "<a>" not in page  # no dead href-less anchor around thumbnails
+
+
 def test_render_page_escapes_script_close_in_paths():
     groups = {1: [g(id=9, source_path="C:/evil</script><b>x.jpg")]}
     rows = decision_rows(groups, {})

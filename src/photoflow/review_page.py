@@ -110,6 +110,10 @@ def render_page(payload: dict) -> str:
     return PAGE_TEMPLATE.replace("__DATA__", data)
 
 
+# PAGE_TEMPLATE is NOT a raw string: backslashes destined for the JS layer must be
+# doubled here (e.g. "\\r\\n" in this source reaches the browser as \r\n).
+# In-page refresh() is O(files) per click — fine for hundreds of review items,
+# revisit if review queues hit thousands.
 PAGE_TEMPLATE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>photoflow review</title>
 <style>
@@ -134,7 +138,8 @@ button:hover{border-color:#888}
 .f.suggested{border-style:dashed;border-color:#7a7}
 .f.keep{border-style:solid;border-color:#3c3;background:#1c241c}
 .f.skip{opacity:.45}
-.f img{max-height:220px;max-width:264px;border-radius:4px;cursor:zoom-in}
+.f img{max-height:220px;max-width:264px;border-radius:4px}
+.f a img{cursor:zoom-in}
 .stats{font-size:12px;margin:6px 0;color:#bcd}
 .hl{color:#6e6;font-weight:600}
 .badge{display:inline-block;padding:0 5px;border-radius:4px;font-size:11px;
@@ -171,29 +176,42 @@ const COLS = ["group_id","file_id","source_path","resolution","size_kb",
               "suggestion","decision","merge_from_file_id"];
 const byGid = {}, groupOf = {}, dec = {}, donorOf = {};
 let fileHandle = null, dirty = false, savedOnce = false, hideDecided = false;
+let saving = false, storageWarned = false;
+
+function norm(d) {  // decision vocabulary: only keep/skip (any case) survive
+  d = String(d == null ? "" : d).toLowerCase();
+  return d === "keep" || d === "skip" ? d : "";
+}
 
 for (const g of DATA.groups) {
   byGid[g.gid] = g;
   donorOf[g.gid] = null;
   for (const f of g.files) {
     groupOf[f.id] = g.gid;
-    dec[f.id] = f.decision || "";
-    if (f.decision === "keep" && f.merge) donorOf[g.gid] = Number(f.merge);
+    dec[f.id] = norm(f.decision);
+    if (dec[f.id] === "keep" && f.merge) donorOf[g.gid] = Number(f.merge);
   }
 }
 try {  // localStorage overlays the CSV baseline (crash insurance)
   const saved = JSON.parse(localStorage.getItem(LSKEY) || "null");
   if (saved) {
-    for (const [id, d] of Object.entries(saved.dec || {})) if (id in dec) dec[id] = d;
+    let restored = false;
+    for (const [id, d] of Object.entries(saved.dec || {}))
+      if (id in dec) { dec[id] = norm(d); restored = true; }
     for (const [gid, d] of Object.entries(saved.donorOf || {}))
-      if (gid in donorOf) donorOf[gid] = d;
+      if (gid in donorOf) { donorOf[gid] = d; restored = true; }
+    if (restored) {  // overlay only ever holds unsaved work -> flag it
+      dirty = true;
+      document.getElementById("savemsg").textContent =
+        "restored unsaved selections from last session";
+    }
   }
 } catch (e) { /* corrupt storage: fall back to CSV state */ }
 
 function esc(s) {
   const d = document.createElement("span");
   d.textContent = s == null ? "" : String(s);
-  return d.innerHTML;
+  return d.innerHTML.replace(/"/g, "&quot;");  // safe in double-quoted attributes too
 }
 function fmtSize(b) {
   return b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.round(b / 1024) + " KB";
@@ -211,8 +229,10 @@ function build() {
     let cards = "";
     for (const f of g.files) {
       const img = f.thumb
-        ? (f.uri ? '<a href="' + esc(f.uri) + '" target="_blank">' : "<a>") +
-          '<img src="' + esc(f.thumb) + '" title="open full size"></a>'
+        ? (f.uri
+            ? '<a href="' + esc(f.uri) + '" target="_blank">' +
+              '<img src="' + esc(f.thumb) + '" alt="" title="open full size"></a>'
+            : '<img src="' + esc(f.thumb) + '" alt="">')
         : '<div class="meta" style="height:120px;line-height:120px">(no preview)</div>';
       const badge = f.kind === "raw" ? '<span class="badge raw">RAW</span>'
         : f.kind === "video" ? '<span class="badge video">VIDEO</span>' : "";
@@ -287,7 +307,15 @@ function serializeCsv() {
 
 function persist() {
   dirty = true;
-  localStorage.setItem(LSKEY, JSON.stringify({ dec: dec, donorOf: donorOf }));
+  try {
+    localStorage.setItem(LSKEY, JSON.stringify({ dec: dec, donorOf: donorOf }));
+  } catch (e) {  // quota/private mode: clicks still work, just no crash insurance
+    if (!storageWarned) {
+      storageWarned = true;
+      document.getElementById("savemsg").textContent =
+        "selections won't survive closing the tab (storage blocked)";
+    }
+  }
 }
 
 function refresh() {
@@ -327,33 +355,42 @@ document.getElementById("hide").onchange = (e) => {
 };
 
 document.getElementById("save").onclick = async () => {
-  const csvText = serializeCsv();
+  if (saving) return;
+  saving = true;
   try {
-    if (window.showSaveFilePicker) {
-      if (!fileHandle)
-        fileHandle = await showSaveFilePicker({
-          suggestedName: "decisions.csv",
-          types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }],
-        });
-      const w = await fileHandle.createWritable();
-      await w.write(csvText);
-      await w.close();
-    } else {
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(new Blob([csvText], { type: "text/csv" }));
-      a.download = "decisions.csv";
-      a.click();
+    const csvText = serializeCsv();
+    try {
+      if (window.showSaveFilePicker) {
+        if (!fileHandle)
+          fileHandle = await showSaveFilePicker({
+            suggestedName: "decisions.csv",
+            types: [{ description: "CSV", accept: { "text/csv": [".csv"] } }],
+          });
+        const w = await fileHandle.createWritable();
+        await w.write(csvText);
+        await w.close();
+      } else {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([csvText], { type: "text/csv" }));
+        a.download = "decisions.csv";
+        a.click();
+        URL.revokeObjectURL(a.href);
+      }
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      fileHandle = null;  // stale/revoked handle: re-prompt the picker next click
+      alert("save failed: " + e);
+      return;
     }
-  } catch (e) {
-    if (e.name === "AbortError") return;
-    alert("save failed: " + e);
-    return;
+    dirty = false;
+    savedOnce = true;
+    try { localStorage.removeItem(LSKEY); } catch (e) {}  // saved state lives in the CSV now
+    document.getElementById("savemsg").textContent =
+      "saved " + new Date().toLocaleTimeString();
+    refresh();
+  } finally {
+    saving = false;
   }
-  dirty = false;
-  savedOnce = true;
-  document.getElementById("savemsg").textContent =
-    "saved " + new Date().toLocaleTimeString();
-  refresh();
 };
 
 window.pf = { keep: clickKeep, donate: clickDonate, serializeCsv: serializeCsv,
