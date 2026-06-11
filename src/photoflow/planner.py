@@ -8,12 +8,11 @@ from pathlib import Path
 
 from photoflow.audit import log_action
 from photoflow.bktree import BKTree
-from photoflow.config import BURST_WINDOW_S, NEAR_DUPE_THRESHOLD
 from photoflow.dates import parse_exif_date, resolve_date
 from photoflow.hashing import HAVE_IMAGEHASH
 
 
-def cmd_plan(conn, workdir, run_id, log_fh, args):
+def cmd_plan(conn, workdir, run_id, log_fh, args, cfg):
     # roles/groups are recomputed every plan; only copied/error/manual-skip
     # statuses are durable across plans
     conn.execute("""UPDATE files SET role=NULL, group_id=NULL, dupe_of=NULL
@@ -98,7 +97,7 @@ def cmd_plan(conn, workdir, run_id, log_fh, args):
             return x
 
         for h in ph_map:
-            for nb in tree.query(h, NEAR_DUPE_THRESHOLD):
+            for nb in tree.query(h, cfg.near_dupe_threshold):
                 ra, rb = find(h), find(nb)
                 if ra != rb:
                     parent[ra] = rb
@@ -112,13 +111,13 @@ def cmd_plan(conn, workdir, run_id, log_fh, args):
                 continue
             # burst test: every member has an exif time, same camera,
             # consecutive gaps within the window -> keep all silently
-            times = [parse_exif_date(m["exif_date"]) for m in members]
+            times = [parse_exif_date(m["exif_date"], cfg.min_year) for m in members]
             cams = {m["camera"] for m in members}
             is_burst = all(times) and len(cams) == 1 and None not in cams
             if is_burst:
                 times.sort()
                 is_burst = all(
-                    (b - a) <= timedelta(seconds=BURST_WINDOW_S)
+                    (b - a) <= timedelta(seconds=cfg.burst_window_s)
                     for a, b in zip(times, times[1:])  # noqa: B905 (verbatim from reference)
                 )
             gid = next_group()
@@ -132,7 +131,7 @@ def cmd_plan(conn, workdir, run_id, log_fh, args):
 
     # ---- 4. resolve dates
     for r in by_id.values():
-        iso, src, conf = resolve_date(r)
+        iso, src, conf = resolve_date(r, cfg.min_year)
         r["date_taken"], r["date_source"], r["date_confidence"] = iso, src, conf
 
     # ---- write plan back

@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from photoflow.apply import cmd_apply
+from photoflow.config import load_config
 from photoflow.db import new_run, open_db
 from photoflow.planner import cmd_plan
 from photoflow.review import cmd_review
@@ -35,6 +36,7 @@ def main():
 
     args = ap.parse_args()
     workdir = Path(args.workdir).expanduser().resolve()
+    cfg = load_config(workdir)
     conn = open_db(workdir)
     run_id = new_run(conn, args.cmd, vars(args) | {"workdir": str(workdir)})
     logs = workdir / "logs"
@@ -46,4 +48,4 @@ def main():
             "review": cmd_review,
             "apply": cmd_apply,
             "status": cmd_status,
-        }[args.cmd](conn, workdir, run_id, log_fh, args)
+        }[args.cmd](conn, workdir, run_id, log_fh, args, cfg)

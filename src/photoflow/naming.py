@@ -6,17 +6,15 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from photoflow.config import SLUG_MAX
 
-
-def slugify(stem: str) -> str:
+def slugify(stem: str, slug_max: int = 40) -> str:
     s = re.sub(r"[^A-Za-z0-9]+", "-", stem).strip("-")
-    return s[:SLUG_MAX] or "img"
+    return s[:slug_max] or "img"
 
 
-def dest_for(row, out_root: Path) -> Path:
+def dest_for(row, out_root: Path, slug_max: int = 40) -> Path:
     h8 = row["content_hash"][:8]
-    slug = slugify(Path(row["source_path"]).stem)
+    slug = slugify(Path(row["source_path"]).stem, slug_max)
     ext = row["ext"].lower()
     if row["date_taken"]:
         dt = datetime.fromisoformat(row["date_taken"])

@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from photoflow.config import IMAGE_EXT, RAW_EXT, SIDECAR_EXT, VIDEO_EXT
+from photoflow.config import Config
 
 ROLES = frozenset({"keep", "exact_dupe", "raw_jpeg_pair", "live_pair", "burst", "review"})
 DURABLE_STATUSES = frozenset({"copied", "error", "skipped_manual"})  # HANDOFF §2.4
 
 
-def classify(ext: str) -> str:
-    if ext in IMAGE_EXT:
+def classify(ext: str, cfg: Config) -> str:
+    if ext in cfg.image_ext:
         return "image"
-    if ext in RAW_EXT:
+    if ext in cfg.raw_ext:
         return "raw"
-    if ext in VIDEO_EXT:
+    if ext in cfg.video_ext:
         return "video"
-    if ext in SIDECAR_EXT:
+    if ext in cfg.sidecar_ext:
         return "sidecar"
     return "other"

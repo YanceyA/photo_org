@@ -12,7 +12,7 @@ from photoflow.naming import dest_for
 from photoflow.xmp import EMBED_EXT, embed_args, xmp_sidecar
 
 
-def cmd_apply(conn, workdir, run_id, log_fh, args):
+def cmd_apply(conn, workdir, run_id, log_fh, args, cfg):
     out_root = Path(args.out).expanduser().resolve()
     decisions: dict[int, tuple[str, int | None]] = {}
     dec_path = Path(args.decisions) if args.decisions else workdir / "decisions.csv"
@@ -51,7 +51,7 @@ def cmd_apply(conn, workdir, run_id, log_fh, args):
             if d[1]:
                 merge_jobs.append((r["id"], d[1]))
 
-        dest = dest_for(r, out_root)
+        dest = dest_for(r, out_root, cfg.slug_max)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if args.dry_run:
             print(f"DRY  {r['source_path']}  ->  {dest}")

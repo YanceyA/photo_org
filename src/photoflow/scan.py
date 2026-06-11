@@ -11,7 +11,7 @@ from photoflow.hashing import HAVE_HEIF, HAVE_IMAGEHASH, content_hash, perceptua
 from photoflow.models import classify
 
 
-def cmd_scan(conn, workdir, run_id, log_fh, args):
+def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
     if not exiftool_available():
         sys.exit("exiftool not found on PATH - install it first (see README).")
     if not HAVE_IMAGEHASH:
@@ -33,7 +33,7 @@ def cmd_scan(conn, workdir, run_id, log_fh, args):
             if not p.is_file() or p.name.startswith("."):
                 continue
             ext = p.suffix.lower()
-            kind = classify(ext)
+            kind = classify(ext, cfg)
             if kind == "other":
                 continue
             sp = str(p)
@@ -76,7 +76,7 @@ def cmd_scan(conn, workdir, run_id, log_fh, args):
 
     # exif
     print("reading metadata (exiftool)...")
-    meta = exiftool_json(new_paths)
+    meta = exiftool_json(new_paths, cfg.exiftool_batch)
     for sp, rec in meta.items():
         raw_date = (
             rec.get("DateTimeOriginal") or rec.get("CreateDate") or rec.get("MediaCreateDate")

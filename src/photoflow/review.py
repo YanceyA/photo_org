@@ -13,7 +13,7 @@ if HAVE_PIL:
     from PIL import Image
 
 
-def cmd_review(conn, workdir, run_id, log_fh, args):
+def cmd_review(conn, workdir, run_id, log_fh, args, cfg):
     rows = conn.execute(
         "SELECT * FROM files WHERE role='review' ORDER BY group_id, size DESC"
     ).fetchall()

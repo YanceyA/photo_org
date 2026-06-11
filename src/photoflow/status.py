@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-def cmd_status(conn, workdir, run_id, log_fh, args):
+def cmd_status(conn, workdir, run_id, log_fh, args, cfg):
     print("by status:")
     for r in conn.execute("SELECT status, COUNT(*) c FROM files GROUP BY status"):
         print(f"  {r['status']:>14}: {r['c']}")

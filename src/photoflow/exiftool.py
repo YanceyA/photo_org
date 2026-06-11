@@ -10,8 +10,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-from photoflow.config import EXIFTOOL_BATCH
-
 EXIF_TAGS = [
     "-DateTimeOriginal",
     "-CreateDate",
@@ -26,11 +24,11 @@ def exiftool_available() -> bool:
     return shutil.which("exiftool") is not None
 
 
-def exiftool_json(paths: list[str]) -> dict[str, dict]:
+def exiftool_json(paths: list[str], batch_size: int = 200) -> dict[str, dict]:
     """Run exiftool on a batch of paths, return {path: tags}."""
     out: dict[str, dict] = {}
-    for i in range(0, len(paths), EXIFTOOL_BATCH):
-        batch = paths[i : i + EXIFTOOL_BATCH]
+    for i in range(0, len(paths), batch_size):
+        batch = paths[i : i + batch_size]
         with tempfile.NamedTemporaryFile("w", suffix=".args", delete=False, encoding="utf-8") as af:
             af.write("-j\n-n\n-fast2\n-charset\nfilename=utf8\n")
             for t in EXIF_TAGS:
