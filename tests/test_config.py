@@ -17,7 +17,7 @@ def test_defaults_match_legacy_constants():
 
 def test_enrich_defaults():
     c = Config()
-    assert c.enrich_tagger == "ram"
+    assert c.enrich_tagger == "auto"
     assert c.enrich_min_cluster_size == 5
     assert 0.0 < c.enrich_cluster_prob_floor < 1.0
     assert c.tag_score_review < c.tag_score_accept

@@ -92,10 +92,11 @@ PhotoPrism read. It runs on the copied library only — sources are never touche
   embeds them; HDBSCAN groups them into per-person clusters. You name each cluster once and
   every photo of that person inherits the name. Confirmed names are durable: re-running
   never re-clusters an already-named face.
-- **Content tags** — [RAM++](https://github.com/xinyu1205/recognize-anything) (Recognize
-  Anything Plus) tags each photo ("beach", "birthday cake", "dog"). If RAM++ isn't
-  installed, it falls back to CLIP/SigLIP zero-shot tagging over a built-in family-photo
-  vocabulary.
+- **Content tags** — CLIP/SigLIP zero-shot tagging over a built-in family-photo vocabulary
+  ("beach", "birthday cake", "dog") with calibrated per-tag scores. Optionally
+  [RAM++](https://github.com/xinyu1205/recognize-anything) (Recognize Anything Plus) for
+  richer tags — but RAM++ is unmaintained and pins an old `transformers` that won't run on
+  Python 3.14, so SigLIP is the practical tagger here (see RAM++ note below).
 - **Verify only the edges** — the interactive `enrich_review.html` auto-accepts the
   confident bulk and surfaces only the marginal cases: low-confidence cluster members get a
   ⚠ flag, and uncertain tags are grouped *by tag* (one tag, many candidate photos) so you
@@ -108,21 +109,30 @@ PhotoPrism read. It runs on the copied library only — sources are never touche
 uv sync --extra enrich            # or: pip install -e .[enrich]
 ```
 
-This pulls InsightFace + onnxruntime + scikit-learn + torch + open-clip-torch (the
-CLIP/SigLIP tagger works out of the box). RAM++ is a separate, optional step (it isn't on
-PyPI and needs a 3 GB checkpoint):
+This pulls InsightFace + onnxruntime + scikit-learn + torch + open-clip-torch +
+transformers — the **CLIP/SigLIP tagger works out of the box**, no extra step. Just run the
+workflow below.
+
+**RAM++ (optional, advanced).** RAM++ gives richer tags but is unmaintained: it pins
+`transformers==4.25.x`, whose APIs were removed in modern transformers, and that old version
+won't run on Python 3.14. So on a 3.14 setup RAM++ won't load and enrich falls back to
+SigLIP automatically. If you really want RAM++, run it in a **separate Python 3.11/3.12
+environment** with a compatible transformers, install the git package + 3 GB checkpoint, and
+set `enrich_tagger = "ram"`:
 
 ```
 uv pip install "ram @ git+https://github.com/xinyu1205/recognize-anything.git"
-# the checkpoint auto-downloads on first run, or pre-place it:
-#   huggingface-cli download xinyu1205/recognize-anything-plus-model ram_plus_swin_large_14m.pth
+#   checkpoint auto-downloads on first run (3 GB), or pre-place ram_plus_swin_large_14m.pth
+# NOTE: `uv sync` reconciles the venv to declared deps and will REMOVE this manually
+#       pip-installed `ram` package — reinstall it after any `uv sync`.
 ```
 
-**GPU note:** RAM++/CLIP use the GPU via torch automatically. InsightFace runs on **CPU by
-default** because a GTX 1080-class (Pascal) card on Python 3.14 hits a known onnxruntime-gpu
-crash ([#27588](https://github.com/microsoft/onnxruntime/issues/27588)); CPU face detection
-is slower but reliable. Set `face_device = "cuda"` in `photoflow.toml` once you're on a
-working CUDA stack.
+**GPU note:** CLIP/SigLIP (and RAM++ if used) run on the GPU via torch automatically.
+InsightFace runs on **CPU by default** because a GTX 1080-class (Pascal) card on Python 3.14
+hits a known onnxruntime-gpu crash
+([#27588](https://github.com/microsoft/onnxruntime/issues/27588)); CPU face detection is
+slower but reliable. Set `face_device = "cuda"` in `photoflow.toml` once you're on a working
+CUDA stack.
 
 ### Workflow
 

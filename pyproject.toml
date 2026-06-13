@@ -22,6 +22,7 @@ enrich = [
     "torch",
     "open-clip-torch",
     "timm",
+    "transformers",  # text tower for the default SigLIP CLIP tagger AND RAM++'s BERT
     "huggingface-hub",
 ]
 

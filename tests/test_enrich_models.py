@@ -46,6 +46,34 @@ def test_ram_checkpoint_path_default_and_override(tmp_path: Path):
     assert ram_checkpoint_path(cfg2, tmp_path) == tmp_path / "custom.pth"
 
 
+def test_build_tagger_falls_back_to_clip_when_ram_fails(monkeypatch):
+    # A RAM++ import/load failure (e.g. missing 'transformers') must NOT crash the scan -
+    # build_tagger degrades to CLIP with a clear message.
+    from photoflow.enrich import deps
+    from photoflow.enrich import tagger as t
+
+    monkeypatch.setattr(deps, "HAVE_RAM", True)
+    monkeypatch.setattr(deps, "HAVE_CLIP", True)
+
+    def boom(cfg, workdir):
+        raise ModuleNotFoundError("No module named 'transformers'")
+
+    sentinel = object()
+    monkeypatch.setattr(t, "RamTagger", boom)
+    monkeypatch.setattr(t, "ClipTagger", lambda cfg: sentinel)
+
+    assert t.build_tagger(Config(enrich_tagger="ram"), workdir=None) is sentinel
+
+
+def test_build_tagger_none_when_nothing_available(monkeypatch):
+    from photoflow.enrich import deps
+    from photoflow.enrich import tagger as t
+
+    monkeypatch.setattr(deps, "HAVE_RAM", False)
+    monkeypatch.setattr(deps, "HAVE_CLIP", False)
+    assert t.build_tagger(Config(), workdir=None) is None
+
+
 @pytest.mark.enrich
 def test_face_detector_constructs():
     # Smoke: the InsightFace wrapper builds and exposes detect(); buffalo_l auto-downloads.

@@ -33,7 +33,10 @@ class Config:
     sidecar_ext: frozenset[str] = frozenset({".xmp", ".aae", ".thm"})
 
     # --- enrich subsystem (all optional; defaults give a working CPU-faces / RAM-tags run) ---
-    enrich_tagger: str = "ram"  # ram | clip | auto (auto = ram, fall back to clip if unavailable)
+    # auto = prefer RAM++ but fall back to CLIP/SigLIP if it can't load. RAM++ needs an old
+    # transformers (~4.25) that won't run on Python 3.14, so 'auto' uses SigLIP here. Set
+    # 'clip' to skip RAM entirely, or 'ram' to require it.
+    enrich_tagger: str = "auto"  # ram | clip | auto
     enrich_device: str = "auto"  # torch device for RAM/CLIP: auto | cuda | cpu
     face_device: str = "auto"  # onnxruntime providers for InsightFace: auto | cuda | cpu
     # auto => CPU on this rig: Pascal (1080 Ti) + Py3.14 + onnxruntime-gpu>=1.26 crashes (#27588)

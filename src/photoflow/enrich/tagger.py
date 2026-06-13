@@ -208,10 +208,12 @@ class ClipTagger:
 
 
 def build_tagger(cfg, workdir=None):
-    """Construct the configured tagger, with RAM++->CLIP fallback for enrich_tagger='auto'.
+    """Construct the configured tagger, falling back RAM++ -> CLIP on failure.
 
-    Returns a tagger object exposing .tag(pil_image) -> list[(tag, score|None)], or None if
-    no tagger could be built (caller logs the reason and skips content tagging).
+    Returns a tagger exposing .tag(pil_image) -> list[(tag, score|None)], or None if no
+    tagger could be built (caller logs the reason and skips content tagging). A RAM++ load
+    failure (e.g. its `transformers` dep isn't installed) never crashes the scan: it prints
+    an actionable note and falls back to CLIP. enrich_tagger='clip' forces CLIP and skips RAM.
     """
     from photoflow.enrich.deps import HAVE_CLIP, HAVE_RAM
 
@@ -219,10 +221,20 @@ def build_tagger(cfg, workdir=None):
     if pref in ("ram", "auto") and HAVE_RAM:
         try:
             return RamTagger(cfg, workdir)
-        except Exception:
-            if pref == "ram":
-                raise
-    if pref in ("clip", "auto") or pref == "ram":
-        if HAVE_CLIP:
+        except Exception as e:
+            print(f"NOTE: RAM++ tagger could not load ({type(e).__name__}: {e}).")
+            if HAVE_CLIP:
+                print(
+                    "      Falling back to CLIP/SigLIP. (RAM++ needs an old transformers "
+                    "~4.25 that won't run on Python 3.14 - see README.)"
+                )
+            else:
+                print(
+                    "      RAM++ needs transformers ~4.25 (see README) or set enrich_tagger='clip'."
+                )
+    if pref in ("ram", "clip", "auto") and HAVE_CLIP:
+        try:
             return ClipTagger(cfg)
+        except Exception as e:
+            print(f"NOTE: CLIP tagger could not load ({type(e).__name__}: {e}).")
     return None
