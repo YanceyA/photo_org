@@ -1,7 +1,14 @@
-# Calibration photos + the downloaded Open Images cache stay local (the repo holds no
-# binary assets). Only the manifest + builder script + docs are committed.
+# Calibration photos + the downloaded Open Images cache stay local (the repo holds no binary
+# assets), as does the generated bakeoff_results.json. Only the label CSVs, the builder/tuning
+# scripts, and docs are committed.
 *
 !.gitignore
 !README.md
 !build_openimages_manifest.py
+!build_openimages_precision.py
+!model_bakeoff.py
+!run_bakeoff.py
+!tune_thresholds.py
+!compare_selection.py
 !openimages_manifest.csv
+!openimages_precision.csv

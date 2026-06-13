@@ -128,7 +128,18 @@ uv pip install "ram @ git+https://github.com/xinyu1205/recognize-anything.git"
 #       pip-installed `ram` package — reinstall it after any `uv sync`.
 ```
 
-**GPU note:** CLIP/SigLIP (and RAM++ if used) run on the GPU via torch automatically.
+**GPU note.** `uv sync --extra enrich` installs the **CPU** build of torch, so CLIP/SigLIP
+runs on CPU out of the box (~5–6 min over the calibration set). To use an NVIDIA GPU, install
+a matching CUDA build — verified on a GTX 1080 Ti (Pascal `sm_61`) with CUDA 12.6:
+
+```
+uv pip install "torch==2.12.0+cu126" "torchvision==0.27.0+cu126" \
+    --index-url https://download.pytorch.org/whl/cu126
+# Pick the cuXXX wheel matching your driver. cu126 still ships Pascal sm_61 kernels;
+# cu128 (CUDA 12.8 / Blackwell-era) dropped them, so it won't run on a 1080 Ti.
+# Like the `ram` package, `uv sync` reverts torch to the CPU build — reinstall after any sync.
+```
+
 InsightFace runs on **CPU by default** because a GTX 1080-class (Pascal) card on Python 3.14
 hits a known onnxruntime-gpu crash
 ([#27588](https://github.com/microsoft/onnxruntime/issues/27588)); CPU face detection is
@@ -174,15 +185,26 @@ uv run pytest tests/test_enrich_calibration.py -s
 It pulls a representative subset of **Open Images** (human-verified labels, ~6 photos per
 vocab tag, downloaded on demand and cached — see `tests/calibration_data/`) and measures
 **recall@8** — does the right tag land in each photo's top-8? On `ViT-SO400M-16-SigLIP2-384`
-that's **0.96**, so the tagger ranks tags well on real, cluttered photos. You can also drop
+that's **0.98**, so the tagger ranks tags well on real, cluttered photos. You can also drop
 your own labelled photos in `tests/calibration_data/` with a `manifest.csv`.
 
-Two calibration facts worth knowing: SigLIP 2's sigmoid scores are **low and tag-dependent**
-— a prominent subject (cat, cake) scores ~0.10 but a scene (beach, forest) scores ~0.001–0.03
-*even when correctly top-ranked*. So `tag_score_accept` (0.05) / `tag_score_review` (0.008)
-are deliberately low and inclusive, and the review step + global blacklist do the real
-filtering. If you change `clip_model`, run the suite and read the printed per-tag scores to
-retune the thresholds for your library.
+**Why SigLIP 2?** A 15-model bake-off (`tests/calibration_data/run_bakeoff.py`) benchmarked
+the strongest open_clip zero-shot models — SigLIP2 variants, DFN5B, MetaCLIP2, EVA02, LAION
+ViT-H/bigG, CLIPA, ConvNeXt — on recall **and** a precision metric (per-tag present-vs-absent
+AUC over verified negatives). `ViT-SO400M-16-SigLIP2-384` won outright; every non-SigLIP model
+scored measurably lower. So the model isn't the bottleneck — the vocabulary and thresholds are.
+
+Two calibration facts worth knowing. (1) SigLIP 2's sigmoid scores are **low and vary ~100×
+by tag** — a prominent subject (cat, cake) scores ~0.10 but a correct-but-low-scale tag (car,
+flowers, snow) scores ~0.002–0.01 *even when ranked #1 for the photo*. `scan` applies a tag
+iff its absolute score ≥ `tag_score_review`, so the floor must be low or those correct tags
+are silently dropped — at the old 0.008 floor only ~0.3 tags/photo survived. The retuned
+`tag_score_accept` (0.02) / `tag_score_review` (0.0015) roughly double recall; the auto band
+stays ~0.81-precise and the review step + blacklist filter the rest. (2) The vocabulary is
+pruned of tags the model can't do (`child` scored below chance and is covered by face
+clustering; `books` scored higher on non-book photos). Retune with
+`tests/calibration_data/tune_thresholds.py` / `compare_selection.py` if you change `clip_model`
+or the vocab.
 
 ## Files it manages
 

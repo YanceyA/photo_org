@@ -47,13 +47,19 @@ class Config:
     enrich_cluster_prob_floor: float = 0.5  # member prob below this = edge case for review
     enrich_assign_threshold: float = 0.5  # cosine sim to auto-suggest a new face to a named person
     face_crop_pad: float = 0.3  # padding around bbox when writing the review thumbnail
-    # SigLIP2 sigmoid probs are low-scaled (logit_bias ~ -16) AND tag-dependent: on the Open
-    # Images calibration set prominent subjects score ~0.10 (cat, cake) while scenes score
-    # ~0.001-0.03 (beach, forest) even when correctly top-ranked. So thresholds are low and
-    # inclusive - the review step + blacklist do the real filtering. Retune via the calibration
-    # report (tests/test_enrich_calibration.py) if you change clip_model.
-    tag_score_accept: float = 0.05  # score >= => auto-accept
-    tag_score_review: float = 0.008  # [review, accept) => edge case; below => dropped
+    # SigLIP2 sigmoid scores are low and vary ~100x BY TAG: on the Open Images calibration set
+    # prominent subjects score ~0.10 (cat, cake) while correct-but-low-scale tags score
+    # ~0.002-0.01 (car, flowers, snow, forest, park) even when ranked #1 for the photo. scan.py
+    # applies a tag iff its absolute score >= tag_score_review, so the review floor MUST be low
+    # or those correct tags are silently dropped (at the old 0.008 floor only ~0.3 tags/photo
+    # survived, recall ~0.34). These values were fit on the calibration set (see
+    # tests/calibration_data/compare_selection.py): the low review floor ~doubles recall, the
+    # review band + blacklist do the precision filtering, and accept auto-takes only the
+    # high-confidence high-scale tags. A per-image top-k / relative rule was measured and did
+    # NOT beat a simple low global floor, so the global cutoff is kept. Retune via the
+    # calibration tools (tests/calibration_data/) if you change clip_model or FAMILY_VOCAB.
+    tag_score_accept: float = 0.02  # score >= => auto-accept (high-confidence; ~0.81 precision)
+    tag_score_review: float = 0.0015  # [review, accept) => human-review band; below => dropped
     clip_prompt: str = "a photo of a {}."  # single SigLIP prompt; ensembling dilutes the score
     ram_checkpoint: str = ""  # path to ram_plus_swin_large_14m.pth ("" => workdir/models/...)
     ram_image_size: int = 384

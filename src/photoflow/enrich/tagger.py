@@ -55,10 +55,12 @@ FAMILY_VOCAB: dict[str, list[str]] = {
         "picnic",
         "barbecue",
     ],
+    # NOTE: people are primarily handled by the FACE pipeline (detect -> cluster -> name), so
+    # these are coarse scene-level cues only. "child" was dropped: on the calibration set it
+    # scored below chance (AUC 0.47) and duplicates the face axis. "baby" is kept (AUC 0.99).
     "people": [
         "baby",
         "toddler",
-        "child",
         "group of people",
         "family portrait",
         "couple",
@@ -77,8 +79,7 @@ FAMILY_VOCAB: dict[str, list[str]] = {
         "christmas tree",
         "fireworks",
         "toys",
-        "books",
-    ],
+    ],  # "books" dropped: scored higher on non-book photos than book photos (AUC 0.53)
     "activity": [
         "swimming",
         "hiking",

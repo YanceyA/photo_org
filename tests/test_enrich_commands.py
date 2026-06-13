@@ -70,8 +70,11 @@ class FakeTagger:
     source = "clip"
 
     def tag(self, im):
-        # scores chosen to land in each band under the SigLIP2 thresholds (0.05 / 0.008)
-        return [("beach", 0.5), ("boat", 0.02), ("noise", 0.004)]  # auto / review / dropped
+        # Scores derived from the configured bands so this stays correct across tagger-model
+        # swaps (different models live on different score scales): one clearly-auto, one inside
+        # the [review, accept) edge band, one clearly-dropped.
+        a, r = Config().tag_score_accept, Config().tag_score_review
+        return [("beach", a + 0.1), ("boat", (a + r) / 2), ("noise", r / 2)]  # auto/review/dropped
 
 
 # --------------------------------------------------------------------------- scan
