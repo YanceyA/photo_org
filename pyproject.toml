@@ -9,6 +9,21 @@ dependencies = [
 
 [project.optional-dependencies]
 images = ["Pillow", "ImageHash", "pillow-heif"]
+# Face detection + content tagging. CLIP/SigLIP (open-clip-torch) is the always-installable
+# tagger, so [enrich] alone is fully functional; RAM++ is a separate git + 3GB-checkpoint
+# step (see README). GPU users: swap onnxruntime->onnxruntime-gpu and install the CUDA torch
+# build. Note: InsightFace runs on CPU on Pascal+Py3.14 (onnxruntime-gpu #27588).
+enrich = [
+    "insightface",
+    "onnxruntime",
+    "scikit-learn",
+    "numpy",
+    "opencv-python-headless",
+    "torch",
+    "open-clip-torch",
+    "timm",
+    "huggingface-hub",
+]
 
 [dependency-groups]
 dev = [
@@ -17,6 +32,7 @@ dev = [
     "Pillow",
     "ImageHash",
     "pre-commit>=4.6.0",
+    "scikit-learn>=1.9.0",
 ]
 
 [project.scripts]
@@ -33,6 +49,7 @@ packages = ["src/photoflow"]
 testpaths = ["tests"]
 markers = [
     "exiftool: requires exiftool on PATH (skipped when absent)",
+    "enrich: requires the [enrich] model stack (insightface/torch/open_clip; skipped when absent)",
 ]
 
 [tool.ruff]
@@ -45,3 +62,5 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 # load-bearing line in the XMP packet template (verbatim from the deleted reference implementation)
 "src/photoflow/xmp.py" = ["E501"]
+# load-bearing HTML/JS template; wrapping the inline handlers/strings would break readability
+"src/photoflow/enrich/page.py" = ["E501"]

@@ -8,10 +8,23 @@ from pathlib import Path
 from photoflow.apply import cmd_apply
 from photoflow.config import load_config
 from photoflow.db import new_run, open_db
+from photoflow.enrich.apply import cmd_enrich_apply
+from photoflow.enrich.cluster import cmd_enrich_cluster
+from photoflow.enrich.review import cmd_enrich_review
+from photoflow.enrich.scan import cmd_enrich_scan
+from photoflow.enrich.status import cmd_enrich_status
 from photoflow.planner import cmd_plan
 from photoflow.review import cmd_review
 from photoflow.scan import cmd_scan
 from photoflow.status import cmd_status
+
+ENRICH_COMMANDS = {
+    "scan": cmd_enrich_scan,
+    "cluster": cmd_enrich_cluster,
+    "review": cmd_enrich_review,
+    "apply": cmd_enrich_apply,
+    "status": cmd_enrich_status,
+}
 
 
 def main():
@@ -34,18 +47,36 @@ def main():
 
     sub.add_parser("status", help="manifest summary")
 
+    # enrich: faces + content tags written into the organized library as portable XMP
+    enrich = sub.add_parser("enrich", help="add people + content tags to the organized library")
+    esub = enrich.add_subparsers(dest="enrich_step", required=True)
+    esub.add_parser("scan", help="detect faces + content tags for copied library images")
+    esub.add_parser("cluster", help="group unassigned faces into per-person clusters")
+    esub.add_parser("review", help="export enrich_review.html + faces.csv + tags.csv")
+    ea = esub.add_parser("apply", help="write confirmed people + tags into the library files")
+    ea.add_argument("--dry-run", action="store_true")
+    esub.add_parser("status", help="enrich summary (faces, clusters, tags)")
+
     args = ap.parse_args()
     workdir = Path(args.workdir).expanduser().resolve()
     cfg = load_config(workdir)
     conn = open_db(workdir)
-    run_id = new_run(conn, args.cmd, vars(args) | {"workdir": str(workdir)})
-    logs = workdir / "logs"
-    logs.mkdir(exist_ok=True)
-    with open(logs / f"run_{run_id:04d}_{args.cmd}.jsonl", "a", encoding="utf-8") as log_fh:
-        {
+
+    if args.cmd == "enrich":
+        label = f"enrich-{args.enrich_step}"
+        command_fn = ENRICH_COMMANDS[args.enrich_step]
+    else:
+        label = args.cmd
+        command_fn = {
             "scan": cmd_scan,
             "plan": cmd_plan,
             "review": cmd_review,
             "apply": cmd_apply,
             "status": cmd_status,
-        }[args.cmd](conn, workdir, run_id, log_fh, args, cfg)
+        }[args.cmd]
+
+    run_id = new_run(conn, label, vars(args) | {"workdir": str(workdir)})
+    logs = workdir / "logs"
+    logs.mkdir(exist_ok=True)
+    with open(logs / f"run_{run_id:04d}_{label}.jsonl", "a", encoding="utf-8") as log_fh:
+        command_fn(conn, workdir, run_id, log_fh, args, cfg)

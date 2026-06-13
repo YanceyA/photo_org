@@ -34,12 +34,17 @@ def q(workdir: Path, sql: str, *params):
 
 
 def pytest_collection_modifyitems(config, items):
-    if shutil.which("exiftool"):
-        return
-    skip = pytest.mark.skip(reason="exiftool not on PATH")
+    have_exiftool = shutil.which("exiftool") is not None
+    from photoflow.enrich.deps import HAVE_CLIP, HAVE_FACES
+
+    have_enrich = HAVE_FACES and HAVE_CLIP
+    skip_exif = pytest.mark.skip(reason="exiftool not on PATH")
+    skip_enrich = pytest.mark.skip(reason="[enrich] model stack not installed")
     for item in items:
-        if "exiftool" in item.keywords:
-            item.add_marker(skip)
+        if "exiftool" in item.keywords and not have_exiftool:
+            item.add_marker(skip_exif)
+        if "enrich" in item.keywords and not have_enrich:
+            item.add_marker(skip_enrich)
 
 
 def _gradient(w: int, h: int, seed: int) -> Image.Image:

@@ -59,6 +59,47 @@ def exiftool_json(paths: list[str], batch_size: int = 200) -> dict[str, dict]:
     return out
 
 
+def read_keywords(paths: list[str], batch_size: int = 200) -> dict[str, set[str]]:
+    """Read existing XMP dc:Subject + IPTC:Keywords for each path, as a set per path.
+
+    Used by enrich apply to union new tags/people with what's already on the file (the
+    provenance folder keywords apply wrote, plus any user edits) so the write is a superset
+    and re-applying is idempotent. Missing tags are simply absent (exiftool omits them).
+    """
+    out: dict[str, set[str]] = {}
+    for i in range(0, len(paths), batch_size):
+        batch = paths[i : i + batch_size]
+        with tempfile.NamedTemporaryFile("w", suffix=".args", delete=False, encoding="utf-8") as af:
+            af.write("-j\n-charset\nfilename=utf8\n-XMP-dc:Subject\n-IPTC:Keywords\n")
+            for p in batch:
+                af.write(p + "\n")
+            argfile = af.name
+        try:
+            res = subprocess.run(
+                ["exiftool", "-@", argfile],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if res.stdout.strip():
+                for rec in json.loads(res.stdout):
+                    key = str(Path(rec.get("SourceFile", "")))
+                    kws: set[str] = set()
+                    for field in ("Subject", "Keywords"):
+                        v = rec.get(field)
+                        if isinstance(v, str):
+                            kws.add(v)
+                        elif isinstance(v, list):
+                            kws.update(str(x) for x in v)
+                    out[key] = kws
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  exiftool keyword read failed: {e}", file=sys.stderr)
+        finally:
+            os.unlink(argfile)
+    return out
+
+
 def exiftool_apply_argfile(lines: list[str]):
     """Run one exiftool process over a prepared -execute argfile (fast batching)."""
     if not lines:

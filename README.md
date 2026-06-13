@@ -82,6 +82,76 @@ duplicates. Re-running any step is safe (idempotent).
   goes to the `actions` table in `photoflow_work/photoflow.db` and to
   `photoflow_work/logs/run_NNNN_<cmd>.jsonl`.
 
+## Enrich: people + content tags (optional)
+
+After you've built a library with `apply`, the **enrich** stage adds searchable people
+and content tags *in place*, written as portable XMP that digiKam, Immich, Lightroom and
+PhotoPrism read. It runs on the copied library only — sources are never touched.
+
+- **People** — [InsightFace](https://github.com/deepinsight/insightface) detects faces and
+  embeds them; HDBSCAN groups them into per-person clusters. You name each cluster once and
+  every photo of that person inherits the name. Confirmed names are durable: re-running
+  never re-clusters an already-named face.
+- **Content tags** — [RAM++](https://github.com/xinyu1205/recognize-anything) (Recognize
+  Anything Plus) tags each photo ("beach", "birthday cake", "dog"). If RAM++ isn't
+  installed, it falls back to CLIP/SigLIP zero-shot tagging over a built-in family-photo
+  vocabulary.
+- **Verify only the edges** — the interactive `enrich_review.html` auto-accepts the
+  confident bulk and surfaces only the marginal cases: low-confidence cluster members get a
+  ⚠ flag, and uncertain tags are grouped *by tag* (one tag, many candidate photos) so you
+  confirm "is this really a *boat*?" across the whole library at once. One click blacklists
+  a junk tag (e.g. RAM's ubiquitous "person") everywhere.
+
+### Setup
+
+```
+uv sync --extra enrich            # or: pip install -e .[enrich]
+```
+
+This pulls InsightFace + onnxruntime + scikit-learn + torch + open-clip-torch (the
+CLIP/SigLIP tagger works out of the box). RAM++ is a separate, optional step (it isn't on
+PyPI and needs a 3 GB checkpoint):
+
+```
+uv pip install "ram @ git+https://github.com/xinyu1205/recognize-anything.git"
+# the checkpoint auto-downloads on first run, or pre-place it:
+#   huggingface-cli download xinyu1205/recognize-anything-plus-model ram_plus_swin_large_14m.pth
+```
+
+**GPU note:** RAM++/CLIP use the GPU via torch automatically. InsightFace runs on **CPU by
+default** because a GTX 1080-class (Pascal) card on Python 3.14 hits a known onnxruntime-gpu
+crash ([#27588](https://github.com/microsoft/onnxruntime/issues/27588)); CPU face detection
+is slower but reliable. Set `face_device = "cuda"` in `photoflow.toml` once you're on a
+working CUDA stack.
+
+### Workflow
+
+```
+uv run photoflow enrich scan      # detect faces + tag content (GPU/CPU, incremental)
+uv run photoflow enrich cluster   # group unassigned faces into per-person clusters
+uv run photoflow enrich review    # open photoflow_work/enrich_review.html
+# ... name clusters, eject any ⚠ mis-grouped faces, confirm edge tags, Save both CSVs ...
+uv run photoflow enrich apply [--dry-run]   # write XMP into the library files / sidecars
+uv run photoflow enrich status
+```
+
+`enrich scan`/`apply` are incremental and idempotent — run them again after importing more
+photos and only the new files are processed.
+
+### What gets written
+
+Per file, unioned with (never clobbering) the provenance keywords `apply` already wrote:
+
+- content tags + person names → `dc:subject`, mirrored to `IPTC:Keywords` and
+  `lr:HierarchicalSubject` (`People|<name>`) so Immich and digiKam pick them up;
+- person names also → `Iptc4xmpExt:PersonInImage`;
+- **MWG face regions** (`XMP-mwg-rs`, named rectangles) so digiKam / Lightroom / Immich show
+  the face boxes.
+
+Embedded for JPEG/PNG/TIFF/HEIC; `.xmp` sidecars for RAW and video. Tune thresholds
+(`enrich_min_cluster_size`, `tag_score_accept`, `face_device`, `enrich_tagger`, …) in
+`photoflow.toml` — see `src/photoflow/config.py`.
+
 ## Files it manages
 
 Images: jpg jpeg png heic heif tif tiff bmp gif webp

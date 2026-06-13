@@ -32,6 +32,28 @@ class Config:
     )
     sidecar_ext: frozenset[str] = frozenset({".xmp", ".aae", ".thm"})
 
+    # --- enrich subsystem (all optional; defaults give a working CPU-faces / RAM-tags run) ---
+    enrich_tagger: str = "ram"  # ram | clip | auto (auto = ram, fall back to clip if unavailable)
+    enrich_device: str = "auto"  # torch device for RAM/CLIP: auto | cuda | cpu
+    face_device: str = "auto"  # onnxruntime providers for InsightFace: auto | cuda | cpu
+    # auto => CPU on this rig: Pascal (1080 Ti) + Py3.14 + onnxruntime-gpu>=1.26 crashes (#27588)
+    enrich_batch: int = 16
+    enrich_face_min_score: float = 0.55  # InsightFace det_score floor
+    enrich_min_cluster_size: int = 5  # HDBSCAN: min faces to call a cluster a person
+    enrich_min_samples: int = 0  # HDBSCAN min_samples; 0 => None (= min_cluster_size)
+    enrich_cluster_prob_floor: float = 0.5  # member prob below this = edge case for review
+    enrich_assign_threshold: float = 0.5  # cosine sim to auto-suggest a new face to a named person
+    face_crop_pad: float = 0.3  # padding around bbox when writing the review thumbnail
+    tag_score_accept: float = 0.5  # CLIP/SigLIP score >= => auto-accept
+    tag_score_review: float = 0.32  # [review, accept) => edge case; below => dropped
+    ram_checkpoint: str = ""  # path to ram_plus_swin_large_14m.pth ("" => workdir/models/...)
+    ram_image_size: int = 384
+    clip_model: str = "ViT-B-16-SigLIP"  # SigLIP => calibrated sigmoid scores for the review band
+    clip_pretrained: str = "webli"
+    write_mwg_regions: bool = True  # write MWG face-region rectangles (digiKam/Lightroom/Immich)
+    write_iptc_keywords: bool = True  # mirror keywords to IPTC + lr:HierarchicalSubject (Immich)
+    people_keyword_prefix: str = "People"  # hierarchical prefix: People|<name>; "" disables
+
 
 def load_config(workdir: Path) -> Config:
     """Load workdir/photoflow.toml if present; unknown keys are fatal."""
