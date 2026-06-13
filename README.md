@@ -165,18 +165,24 @@ Embedded for JPEG/PNG/TIFF/HEIC; `.xmp` sidecars for RAW and video. Tune thresho
 
 ### Calibrating content tags
 
-SigLIP sigmoid scores are low-scaled (a confident match is ~0.2, not ~0.5), so
-`tag_score_accept` (0.10) / `tag_score_review` (0.035) are calibrated to the default model.
-A calibration suite verifies the tagger suggests the right tags and helps you retune if you
-change `clip_model`:
+A calibration suite checks the tagger against real photos with known labels:
 
 ```
 uv run pytest tests/test_enrich_calibration.py -s
 ```
 
-It tags real photos (bundled `skimage` images, plus any you drop in
-`tests/calibration_data/` with a `manifest.csv`) and prints the per-photo scores so you can
-pick thresholds for your library. See `tests/calibration_data/README.md`.
+It pulls a representative subset of **Open Images** (human-verified labels, ~6 photos per
+vocab tag, downloaded on demand and cached — see `tests/calibration_data/`) and measures
+**recall@8** — does the right tag land in each photo's top-8? On `ViT-SO400M-16-SigLIP2-384`
+that's **0.96**, so the tagger ranks tags well on real, cluttered photos. You can also drop
+your own labelled photos in `tests/calibration_data/` with a `manifest.csv`.
+
+Two calibration facts worth knowing: SigLIP 2's sigmoid scores are **low and tag-dependent**
+— a prominent subject (cat, cake) scores ~0.10 but a scene (beach, forest) scores ~0.001–0.03
+*even when correctly top-ranked*. So `tag_score_accept` (0.05) / `tag_score_review` (0.008)
+are deliberately low and inclusive, and the review step + global blacklist do the real
+filtering. If you change `clip_model`, run the suite and read the printed per-tag scores to
+retune the thresholds for your library.
 
 ## Files it manages
 

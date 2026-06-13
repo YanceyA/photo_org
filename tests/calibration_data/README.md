@@ -1,8 +1,24 @@
 # Calibration photos (local, not committed)
 
-Drop your own labelled photos here to calibrate the SigLIP tagger against your library's
-style and tune the score thresholds. Nothing in this folder is committed except this README
-and `.gitignore` — the repo stays asset-free.
+Calibrate the SigLIP tagger against real photos with known labels. Nothing in this folder is
+committed except this README, the `.gitignore`, the Open Images **manifest** + **builder**
+script — the photos themselves are downloaded/cached locally, so the repo stays asset-free.
+
+## Open Images subset (built-in, downloaded on demand)
+
+`openimages_manifest.csv` lists a representative subset of [Open Images
+V7](https://storage.googleapis.com/openimages/web/index.html) — K human-verified images per
+vocabulary tag (Cat, Beach, Birthday cake, Dog, …). The calibration test downloads just those
+images from the public CVDF mirror into `cache/` (gitignored, reused across runs) and checks
+that the tagger ranks the right tag in each photo's top-8 (an aggregate recall gate).
+
+Rebuild or resize the subset (e.g. 10 images/tag) with:
+
+```
+uv run python tests/calibration_data/build_openimages_manifest.py 10 40
+```
+
+## Your own photos (optional drop-in)
 
 ## How to use
 

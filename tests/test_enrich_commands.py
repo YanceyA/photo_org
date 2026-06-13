@@ -70,8 +70,8 @@ class FakeTagger:
     source = "clip"
 
     def tag(self, im):
-        # scores chosen to land in each band under the SigLIP2 thresholds (0.10 / 0.035)
-        return [("beach", 0.5), ("boat", 0.06), ("noise", 0.01)]  # auto / review / dropped
+        # scores chosen to land in each band under the SigLIP2 thresholds (0.05 / 0.008)
+        return [("beach", 0.5), ("boat", 0.02), ("noise", 0.004)]  # auto / review / dropped
 
 
 # --------------------------------------------------------------------------- scan

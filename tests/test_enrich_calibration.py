@@ -111,6 +111,70 @@ def test_user_known_photos_tagged(tagger, img_path, expected):
     assert any(e in top for e in expected), f"{img_path}: none of {expected} in top-8: {top}"
 
 
+# --- Open Images subset: real photos with human-verified labels (downloaded on demand) ------
+#
+# A representative subset (K images per vocab tag) is listed in openimages_manifest.csv, built
+# by build_openimages_manifest.py. Images download from the public CVDF mirror into cache/
+# (gitignored) and are reused across runs. Skipped if the manifest is missing or offline.
+
+OI_MANIFEST = CALIB_DIR / "openimages_manifest.csv"
+OI_CACHE = CALIB_DIR / "cache"
+OI_IMG_URL = "https://open-images-dataset.s3.amazonaws.com/{split}/{image_id}.jpg"
+OI_RECALL_GATE = 0.85  # aggregate recall@8 must stay above this (observed 0.96 on the subset)
+
+
+def _download_oi(image_id, split):
+    import requests
+
+    p = OI_CACHE / f"{image_id}.jpg"
+    if p.exists():
+        return p
+    try:
+        r = requests.get(OI_IMG_URL.format(split=split, image_id=image_id), timeout=30)
+        if r.status_code == 200 and r.content[:2] == b"\xff\xd8":
+            OI_CACHE.mkdir(exist_ok=True)
+            p.write_bytes(r.content)
+            return p
+    except Exception:
+        return None
+    return None
+
+
+@pytest.fixture(scope="module")
+def oi_cases():
+    if not OI_MANIFEST.exists():
+        pytest.skip(
+            "no openimages_manifest.csv (run tests/calibration_data/build_openimages_manifest.py)"
+        )
+    with open(OI_MANIFEST, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    cases = [
+        (p, r["expected_tag"])
+        for r in rows
+        if (p := _download_oi(r["image_id"], r["split"])) is not None
+    ]
+    if not cases:
+        pytest.skip("could not download any Open Images calibration photos (offline?)")
+    return cases
+
+
+def test_openimages_recall_at_8(tagger, oi_cases):
+    from collections import defaultdict
+
+    from PIL import Image
+
+    hits: dict[str, list[bool]] = defaultdict(list)
+    for path, tag in oi_cases:
+        top8 = _topk(tagger, Image.open(path).convert("RGB"), 8)
+        hits[tag].append(tag in top8)
+    flat = [h for hs in hits.values() for h in hs]
+    recall = sum(flat) / len(flat)
+    by_tag = "  ".join(f"{t}={sum(hs)}/{len(hs)}" for t, hs in sorted(hits.items()))
+    print(f"\nOpen Images recall@8 = {recall:.2f} over {len(flat)} photos ({len(hits)} tags)")
+    print(f"  {by_tag}")
+    assert recall >= OI_RECALL_GATE, f"recall@8 {recall:.2f} < gate {OI_RECALL_GATE}\n  {by_tag}"
+
+
 def test_calibration_report(tagger):
     """Not a gate - prints what the configured model scores on the known photos so you can
     tune tag_score_accept / tag_score_review. Run with `-s` to see it."""

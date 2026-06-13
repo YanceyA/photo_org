@@ -1,4 +1,7 @@
-# User-supplied calibration photos + manifest stay local (the repo holds no binary assets).
+# Calibration photos + the downloaded Open Images cache stay local (the repo holds no
+# binary assets). Only the manifest + builder script + docs are committed.
 *
 !.gitignore
 !README.md
+!build_openimages_manifest.py
+!openimages_manifest.csv
