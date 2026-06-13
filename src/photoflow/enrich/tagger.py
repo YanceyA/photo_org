@@ -7,8 +7,12 @@ CI-testable. Model wrappers carry skip-marked smoke tests.
 RAM++ `inference_ram` returns thresholded tags with NO per-tag score, so RamTagger yields
 (tag, None) and those are trusted as 'auto'. CLIP/SigLIP returns calibrated per-tag scores
 that the scan step bands into auto/review/dropped via classify_tag. SigLIP (the default,
-ViT-B-16-SigLIP/webli) is used for tagging because its sigmoid loss gives genuinely
+ViT-SO400M-16-SigLIP2-384/webli) is used for tagging because its sigmoid loss gives genuinely
 independent multi-label probabilities - softmax-over-vocab would force a single winner.
+
+Each tag is scored with a SINGLE prompt (`cfg.clip_prompt`), not prompt-ensembling: averaging
+normalized text embeddings moves them toward the prompts' centroid, lowering the image cosine
+and breaking SigLIP's logit_bias calibration (a clear "cat" fell from ~0.20 to ~0.09).
 """
 
 from __future__ import annotations
@@ -88,14 +92,6 @@ FAMILY_VOCAB: dict[str, list[str]] = {
     "format": ["selfie", "screenshot", "document", "scanned photo", "black and white photo"],
 }
 
-# Prompt ensembling templates: encode each per tag, normalize, average, re-normalize.
-PROMPT_TEMPLATES = [
-    "a photo of a {}.",
-    "a photo of the {}.",
-    "a {} in a family photo.",
-    "a picture of {}.",
-]
-
 
 def vocab_tags() -> list[str]:
     """Flat, deduped, sorted list of all candidate CLIP tags."""
@@ -136,6 +132,8 @@ def ensure_ram_checkpoint(path: Path) -> Path:
 class RamTagger:
     """RAM++ (swin_l, 14M) tagger. Pure torch; runs on cfg.enrich_device."""
 
+    source = "ram"
+
     def __init__(self, cfg, workdir):
         import torch
         from ram import get_transform, inference_ram
@@ -163,6 +161,8 @@ class ClipTagger:
     """open_clip zero-shot multi-label tagger. SigLIP models give calibrated sigmoid scores;
     plain CLIP falls back to raw cosine similarity."""
 
+    source = "clip"
+
     def __init__(self, cfg):
         import open_clip
         import torch
@@ -177,21 +177,19 @@ class ClipTagger:
         self.preprocess = preprocess
         self.tokenizer = open_clip.get_tokenizer(cfg.clip_model)
         self.tags = vocab_tags()
+        self.prompt = cfg.clip_prompt
         self.is_siglip = hasattr(model, "logit_bias") and model.logit_bias is not None
         self._torch = torch
         self.text_bank = self._build_text_bank()
 
     def _build_text_bank(self):
+        # One prompt per tag, encoded in a single batched forward pass; normalized once.
         torch = self._torch
-        feats = []
         with torch.no_grad():
-            for tag in self.tags:
-                toks = self.tokenizer([t.format(tag) for t in PROMPT_TEMPLATES]).to(self.device)
-                e = self.model.encode_text(toks)
-                e = e / e.norm(dim=-1, keepdim=True)
-                e = e.mean(dim=0)
-                feats.append(e / e.norm())
-        return torch.stack(feats)
+            toks = self.tokenizer([self.prompt.format(t) for t in self.tags]).to(self.device)
+            e = self.model.encode_text(toks)
+            e = e / e.norm(dim=-1, keepdim=True)
+        return e
 
     def tag(self, pil_image) -> list[tuple[str, float]]:
         torch = self._torch

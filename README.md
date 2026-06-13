@@ -110,8 +110,9 @@ uv sync --extra enrich            # or: pip install -e .[enrich]
 ```
 
 This pulls InsightFace + onnxruntime + scikit-learn + torch + open-clip-torch +
-transformers — the **CLIP/SigLIP tagger works out of the box**, no extra step. Just run the
-workflow below.
+transformers — the **CLIP/SigLIP tagger works out of the box**, no extra step. The default
+tagger is **SigLIP 2** (`ViT-SO400M-16-SigLIP2-384`), which gives calibrated per-tag scores.
+Just run the workflow below.
 
 **RAM++ (optional, advanced).** RAM++ gives richer tags but is unmaintained: it pins
 `transformers==4.25.x`, whose APIs were removed in modern transformers, and that old version
@@ -161,6 +162,21 @@ Per file, unioned with (never clobbering) the provenance keywords `apply` alread
 Embedded for JPEG/PNG/TIFF/HEIC; `.xmp` sidecars for RAW and video. Tune thresholds
 (`enrich_min_cluster_size`, `tag_score_accept`, `face_device`, `enrich_tagger`, …) in
 `photoflow.toml` — see `src/photoflow/config.py`.
+
+### Calibrating content tags
+
+SigLIP sigmoid scores are low-scaled (a confident match is ~0.2, not ~0.5), so
+`tag_score_accept` (0.10) / `tag_score_review` (0.035) are calibrated to the default model.
+A calibration suite verifies the tagger suggests the right tags and helps you retune if you
+change `clip_model`:
+
+```
+uv run pytest tests/test_enrich_calibration.py -s
+```
+
+It tags real photos (bundled `skimage` images, plus any you drop in
+`tests/calibration_data/` with a `manifest.csv`) and prints the per-photo scores so you can
+pick thresholds for your library. See `tests/calibration_data/README.md`.
 
 ## Files it manages
 

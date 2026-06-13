@@ -47,11 +47,15 @@ class Config:
     enrich_cluster_prob_floor: float = 0.5  # member prob below this = edge case for review
     enrich_assign_threshold: float = 0.5  # cosine sim to auto-suggest a new face to a named person
     face_crop_pad: float = 0.3  # padding around bbox when writing the review thumbnail
-    tag_score_accept: float = 0.5  # CLIP/SigLIP score >= => auto-accept
-    tag_score_review: float = 0.32  # [review, accept) => edge case; below => dropped
+    # SigLIP2 sigmoid probs are low-scaled (logit_bias ~ -16): a confident zero-shot match is
+    # ~0.2, not ~0.5. Calibrated on ViT-SO400M-16-SigLIP2-384; retune via the calibration
+    # report (tests/test_enrich_calibration.py) if you change clip_model.
+    tag_score_accept: float = 0.10  # score >= => auto-accept
+    tag_score_review: float = 0.035  # [review, accept) => edge case; below => dropped
+    clip_prompt: str = "a photo of a {}."  # single SigLIP prompt; ensembling dilutes the score
     ram_checkpoint: str = ""  # path to ram_plus_swin_large_14m.pth ("" => workdir/models/...)
     ram_image_size: int = 384
-    clip_model: str = "ViT-B-16-SigLIP"  # SigLIP => calibrated sigmoid scores for the review band
+    clip_model: str = "ViT-SO400M-16-SigLIP2-384"  # SigLIP2 SO400M@384 => calibrated sigmoid scores
     clip_pretrained: str = "webli"
     write_mwg_regions: bool = True  # write MWG face-region rectangles (digiKam/Lightroom/Immich)
     write_iptc_keywords: bool = True  # mirror keywords to IPTC + lr:HierarchicalSubject (Immich)
