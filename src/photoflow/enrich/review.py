@@ -47,7 +47,13 @@ def cmd_enrich_review(conn, workdir, run_id, log_fh, args, cfg):
 
     from photoflow.enrich.clustering import nearest_person
 
-    persons = [r["name"] for r in conn.execute("SELECT name FROM persons ORDER BY name")]
+    # Suggestions for the name field: DB persons + any names already typed into faces.csv, so
+    # they survive Save -> re-review even before `enrich apply` writes them to the persons table.
+    prior_faces = _read_prior_faces(workdir / "faces.csv")
+    db_names = {r["name"] for r in conn.execute("SELECT name FROM persons")}
+    csv_names = {(p.get("person") or "").strip() for p in prior_faces.values()}
+    csv_names.discard("")
+    persons = sorted(db_names | csv_names)
 
     # person centroids (mean embedding) for nearest-person suggestions on unassigned faces
     centroids: dict[int, np.ndarray] = {}
@@ -128,7 +134,7 @@ def cmd_enrich_review(conn, workdir, run_id, log_fh, args, cfg):
         print("enrich review: nothing to review yet (run enrich scan + enrich cluster first).")
         return
 
-    f_rows = face_rows(clusters, noise, _read_prior_faces(workdir / "faces.csv"))
+    f_rows = face_rows(clusters, noise, prior_faces)
     t_rows = tag_rows(tag_items, _read_prior_tags(workdir / "tags.csv"))
     write_faces_csv(workdir / "faces.csv", f_rows)
     write_tags_csv(workdir / "tags.csv", t_rows)

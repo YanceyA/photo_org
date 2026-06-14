@@ -281,6 +281,12 @@ button:hover{border-color:#888}
    so a 40k-photo library scrolls smoothly instead of laying out ~57k thumbnails at once */
 .cluster,.tag{content-visibility:auto;contain-intrinsic-size:auto 360px}
 .blnote{color:#e84;font-size:12px;margin-left:6px}
+.dismiss{font-size:11px;padding:3px 8px;color:#b99;border-color:#664}
+.cluster.dismissed{opacity:.5;border-color:#403030}
+.cluster.dismissed .faces,.cluster.dismissed input.name{display:none}
+.cluster.dismissed .dismiss{color:#7a7}
+.cluster:not(.dismissed) .ignored{display:none}
+.ignored{color:#a77;font-size:12px}
 .sentinel{height:1px}
 </style></head><body>
 <header>
@@ -294,9 +300,11 @@ button:hover{border-color:#888}
 </header>
 
 <section class="pane active" id="pane-people">
-  <p class="hint">Type a name on a cluster to label everyone in it at once. Faces flagged
-  <span class="flag">&#9888; check</span> are low-confidence &mdash; click <b>eject</b> to remove
-  a face that doesn't belong. Then <b>Save faces.csv</b> and run <code>photoflow enrich apply</code>.</p>
+  <p class="hint">Type a name on a cluster to label everyone in it at once &mdash; names you've
+  used <b>autocomplete</b>, so type one like "Yancey Arrington" once and pick it next time. Faces
+  flagged <span class="flag">&#9888; check</span> are low-confidence &mdash; click <b>eject</b> to
+  remove a face that doesn't belong, or <b>not interested</b> to ignore a whole cluster you don't
+  care to tag. Then <b>Save faces.csv</b> and run <code>photoflow enrich apply</code>.</p>
   <div class="filterbar"><label><input type="checkbox" id="attn"> show only clusters needing attention</label>
     &nbsp;<span id="people-progress"></span></div>
   <div id="clusters"></div>
@@ -383,8 +391,22 @@ function infinite(root, items, makeHtml, batch){
 }
 
 // ---------------- People ----------------
+// Known names (DB persons + names carried in from faces.csv + everything typed this session)
+// feed the <datalist>, so you type a name like "Yancey Arrington" once and pick it thereafter
+// (the browser type-ahead is case-insensitive and narrows as you type).
+const personOptions = (PEOPLE.persons || []).slice();
+const knownLower = new Set(personOptions.map(n=>n.toLowerCase()));
+function datalistHtml(){ return '<datalist id="persons">'+personOptions.map(p=>'<option value="'+esc(p)+'"></option>').join("")+'</datalist>'; }
+function addPersonOption(name){ name=(name||"").trim(); if(!name) return; const k=name.toLowerCase(); if(knownLower.has(k)) return;
+  knownLower.add(k); personOptions.push(name);
+  const dl=document.getElementById("persons"); if(dl) dl.insertAdjacentHTML("beforeend",'<option value="'+esc(name)+'"></option>'); }
+// seed from names already assigned (carried in via faces.csv or restored from localStorage),
+// so suggestions survive a reload, not just live typing (datalist isn't built yet -> array only)
+for(const k in faceState) addPersonOption(faceState[k].person);
+
 function clusterNamed(c){ return c.members.some(m=>faceState[m.face_id].decision==="keep" && faceState[m.face_id].person); }
-function clusterAttn(c){ return c.members.some(m=>m.edge) || !clusterNamed(c); }
+function clusterDismissed(c){ return c.members.length>0 && c.members.every(m=>faceState[m.face_id].decision==="skip"); }
+function clusterAttn(c){ return !clusterDismissed(c) && (c.members.some(m=>m.edge) || !clusterNamed(c)); }
 function faceHtml(m){ const st=faceState[m.face_id];
   return '<div class="face'+(m.edge?" edge":"")+(st.decision==="skip"?" eject":"")+'" data-fid="'+m.face_id+'">'+thumbHtml(m)
     +'<div class="p">'+(m.edge?'<span class="flag">&#9888;</span> ':"")+Math.round(m.prob*100)+'%</div>'
@@ -394,14 +416,17 @@ function noiseHtml(m){ const st=faceState[m.face_id];
     +'<input class="name" list="persons" style="width:88px" placeholder="name…" value="'+esc(st.person)+'"></div>'; }
 function clusterHtml(c){
   const cur=(c.members.map(m=>faceState[m.face_id].person).find(Boolean))||"";
-  return '<div class="cluster'+(clusterNamed(c)?" named":"")+(clusterAttn(c)?" needs-attn":"")+'" data-cid="'+c.cluster_id+'">'
+  const dism=clusterDismissed(c);
+  return '<div class="cluster'+(clusterNamed(c)?" named":"")+(dism?" dismissed":"")+(clusterAttn(c)?" needs-attn":"")+'" data-cid="'+c.cluster_id+'">'
     +'<h3>cluster '+c.cluster_id+' &middot; '+c.size+' faces '
-    +'<input class="name" list="persons" placeholder="name this person…" value="'+esc(cur)+'"></h3>'
+    +'<input class="name" list="persons" placeholder="name this person…" value="'+esc(cur)+'">'
+    +'<button class="dismiss" type="button">'+(dism?"undo":"not interested")+'</button>'
+    +'<span class="ignored">ignored</span></h3>'
     +'<div class="faces">'+c.members.map(faceHtml).join("")+'</div></div>'; }
 function peopleClusters(){ return attnOnly ? PEOPLE.clusters.filter(clusterAttn) : PEOPLE.clusters; }
 function fillClusters(){
   const root=document.getElementById("clusters");
-  root.innerHTML='<datalist id="persons">'+PEOPLE.persons.map(p=>'<option value="'+esc(p)+'">').join("")+'</datalist>';
+  root.innerHTML=datalistHtml();
   infinite(root, peopleClusters(), clusterHtml, 12);
 }
 function renderPeople(){
@@ -410,8 +435,8 @@ function renderPeople(){
   infinite(document.getElementById("noise"), PEOPLE.noise, noiseHtml, 80);
   updateProgress();
 }
-function updateProgress(){ let n=0; for(const c of PEOPLE.clusters) if(clusterNamed(c)) n++;
-  document.getElementById("people-progress").textContent="named "+n+" / "+PEOPLE.clusters.length+" clusters"; }
+function updateProgress(){ let named=0, dism=0; for(const c of PEOPLE.clusters){ if(clusterNamed(c)) named++; else if(clusterDismissed(c)) dism++; }
+  document.getElementById("people-progress").textContent="named "+named+" · ignored "+dism+" / "+PEOPLE.clusters.length+" clusters"; }
 
 // ---------------- Tags ----------------
 function renderAutoSummary(){
@@ -480,6 +505,17 @@ function tab(which){
 // Event delegation: one listener per container handles every (lazily-built) child, so naming,
 // ejecting, tag-keep and blacklist work no matter when a node is materialized by scrolling.
 document.getElementById("clusters").addEventListener("click",e=>{
+  // "not interested": skip every face in the cluster (won't be tagged) + collapse it away
+  const dz=e.target.closest(".dismiss");
+  if(dz){
+    const cl=dz.closest(".cluster"), c=PEOPLE.clusters.find(x=>String(x.cluster_id)===cl.dataset.cid); if(!c) return;
+    const on=!cl.classList.contains("dismissed");
+    for(const m of c.members){ const st=faceState[m.face_id]; st.decision=on?"skip":""; if(on) st.person=""; }
+    if(on){ const inp=cl.querySelector("input.name"); if(inp) inp.value=""; }
+    cl.classList.toggle("dismissed",on); cl.classList.toggle("named",clusterNamed(c)); cl.classList.toggle("needs-attn",clusterAttn(c));
+    dz.textContent=on?"undo":"not interested";
+    dirty.people=true; persist(); updateProgress(); mark("people"); return;
+  }
   const b=e.target.closest(".ej"); if(!b) return;
   const face=b.closest(".face"), st=faceState[face.dataset.fid];
   st.decision = st.decision==="skip"?"keep":"skip"; dirty.people=true; persist();
@@ -492,14 +528,14 @@ document.getElementById("clusters").addEventListener("change",e=>{
   for(const m of c.members){ const st=faceState[m.face_id];
     if(val){ st.person=val; if(st.decision!=="skip") st.decision="keep"; }
     else { st.person=""; if(st.decision==="keep") st.decision=""; } }
-  dirty.people=true; persist();
-  cl.classList.toggle("named",clusterNamed(c)); cl.classList.toggle("needs-attn",clusterAttn(c));
+  dirty.people=true; persist(); addPersonOption(val);
+  cl.classList.toggle("named",clusterNamed(c)); cl.classList.toggle("dismissed",clusterDismissed(c)); cl.classList.toggle("needs-attn",clusterAttn(c));
   updateProgress(); mark("people");
 });
 document.getElementById("noise").addEventListener("change",e=>{
   const inp=e.target.closest("input.name"); if(!inp) return;
   const st=faceState[inp.closest(".face").dataset.fid], val=inp.value.trim();
-  st.person=val; st.decision=val?"keep":""; dirty.people=true; persist(); mark("people");
+  st.person=val; st.decision=val?"keep":""; dirty.people=true; persist(); addPersonOption(val); mark("people");
 });
 document.getElementById("reviewtags").addEventListener("click",e=>{
   const tp=e.target.closest(".tp"); if(!tp) return;

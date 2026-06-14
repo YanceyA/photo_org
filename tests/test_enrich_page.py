@@ -168,3 +168,15 @@ def test_render_page_renders_lazily_for_big_libraries():
     assert "content-visibility" in html  # off-screen groups skip layout/paint
     # eager full-DOM helpers must be gone (they were the cause of the freeze/OOM)
     assert "renderPeople(); renderTags();" not in html  # both panes no longer build on load
+
+
+def test_render_page_has_name_autocomplete_and_ignore_cluster():
+    """Guard the two review affordances: a live-updated <datalist> for name autocomplete, and
+    an 'ignore whole cluster' control (skip every member) so don't-care clusters can be cleared."""
+    html = render_page(
+        build_people_payload(CLUSTERS, NOISE, face_rows(CLUSTERS, NOISE, {}), [], "W", 0.5),
+        build_tags_payload([], tag_rows([], {}), workdir_key="W"),
+    )
+    assert 'list="persons"' in html and "<datalist" in html  # native autocomplete
+    assert "addPersonOption" in html  # names typed this session feed the suggestions
+    assert "clusterDismissed" in html and "not interested" in html  # ignore-whole-cluster control
