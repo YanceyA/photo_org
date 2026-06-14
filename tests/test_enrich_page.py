@@ -153,3 +153,18 @@ def test_render_page_embeds_payloads_and_hooks():
     # closing-tag escaping so the JSON can't break out of the <script> block
     assert "</script>" not in html.split("__", 1)[0] if "__" in html else True
     json.loads(json.dumps(people))  # payload is JSON-serializable
+
+
+def test_render_page_renders_lazily_for_big_libraries():
+    """Regression guard: the page MUST render lazily, or a 40k-photo library builds ~57k <img>
+    at once and freezes/OOMs the tab. Verify the scaling primitives survive in the template:
+    batched IntersectionObserver fill, lazy images, and content-visibility on groups."""
+    html = render_page(
+        build_people_payload(CLUSTERS, NOISE, face_rows(CLUSTERS, NOISE, {}), [], "W", 0.5),
+        build_tags_payload([], tag_rows([], {}), workdir_key="W"),
+    )
+    assert "IntersectionObserver" in html  # batched, viewport-driven group fill
+    assert 'loading="lazy"' in html  # thumbnails decode only when near the viewport
+    assert "content-visibility" in html  # off-screen groups skip layout/paint
+    # eager full-DOM helpers must be gone (they were the cause of the freeze/OOM)
+    assert "renderPeople(); renderTags();" not in html  # both panes no longer build on load

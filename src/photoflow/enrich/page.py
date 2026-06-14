@@ -4,6 +4,11 @@ Mirrors review_page.py: the caller (enrich/review.py) hands in plain dict rows q
 from the DB, and this module returns the CSV rows + a self-contained HTML string. No I/O,
 no models - testable without GPU or exiftool.
 
+The page renders LAZILY (IntersectionObserver-batched group fill, loading="lazy" thumbnails,
+content-visibility on groups) so a 40k-photo library with tens of thousands of faces + review
+tags stays responsive instead of building ~57k <img> at once (which froze and OOM'd the tab).
+CSV serialization reads the in-memory state objects, not the DOM, so lazy rendering is safe.
+
 Two decision OVERLAYS are produced (kept small so the page stays light on big libraries):
   * faces.csv - one row per face shown for confirmation; naming a cluster fills `person`
     + sets decision=keep for its members; ejecting an edge-case member sets decision=skip.
@@ -272,6 +277,11 @@ button:hover{border-color:#888}
 .chip{display:inline-block;border:1px solid #555;border-radius:12px;padding:2px 10px;margin:3px;font-size:12px;cursor:pointer}
 .chip.bl{border-color:#c44;color:#c44;text-decoration:line-through}
 .filterbar{margin:8px 16px;font-size:12px;color:#9ab}
+/* off-screen clusters/tag-groups skip layout+paint; size is remembered after first render,
+   so a 40k-photo library scrolls smoothly instead of laying out ~57k thumbnails at once */
+.cluster,.tag{content-visibility:auto;contain-intrinsic-size:auto 360px}
+.blnote{color:#e84;font-size:12px;margin-left:6px}
+.sentinel{height:1px}
 </style></head><body>
 <header>
   <h1>photoflow enrich</h1>
@@ -338,7 +348,7 @@ try {
 function esc(s){const d=document.createElement("span");d.textContent=s==null?"":String(s);return d.innerHTML.replace(/"/g,"&quot;");}
 function thumbHtml(m){
   if(!m.thumb) return '<div class="noimg">no img</div>';
-  const img='<img src="'+esc(m.thumb)+'" alt="">';
+  const img='<img loading="lazy" decoding="async" src="'+esc(m.thumb)+'" alt="">';
   return m.uri? '<a href="'+esc(m.uri)+'" target="_blank" title="open original">'+img+'</a>' : img;
 }
 
@@ -347,71 +357,80 @@ function persist(){
   catch(e){ if(!storageWarned){storageWarned=true; document.getElementById("savemsg").textContent="selections won't survive closing the tab (storage blocked)";} }
 }
 
+// ---------------- lazy rendering (keeps huge libraries responsive) ----------------
+// Append groups in small batches as a trailing sentinel nears the viewport, so a 40k-photo
+// library never builds ~57k <img> at once (which froze the tab and exhausted memory). Paired
+// with loading="lazy" thumbnails + content-visibility on groups, off-screen content is cheap.
+let peopleRendered=false, tagsRendered=false;
+function infinite(root, items, makeHtml, batch){
+  const sentinel=document.createElement("div"); sentinel.className="sentinel"; root.appendChild(sentinel);
+  let i=0, scheduled=false;
+  const io=new IntersectionObserver(es=>{ if(es.some(e=>e.isIntersecting)) schedule(); }, {rootMargin:"1400px 0px"});
+  function schedule(){ if(scheduled || i>=items.length) return; scheduled=true; requestAnimationFrame(()=>{ scheduled=false; pump(); }); }
+  function pump(){
+    if(i>=items.length){ io.disconnect(); sentinel.remove(); return; }
+    // Build ONE batch then yield: lets layout (incl. content-visibility real heights) settle
+    // before deciding if the viewport needs more, so a huge first group stops the fill and the
+    // main thread never blocks. IntersectionObserver resumes the fill as the sentinel scrolls in.
+    if(sentinel.getBoundingClientRect().top < innerHeight+1400){
+      const end=Math.min(i+batch, items.length); let html="";
+      for(; i<end; i++) html+=makeHtml(items[i], i);
+      sentinel.insertAdjacentHTML("beforebegin", html);
+      schedule();
+    }
+  }
+  io.observe(sentinel); pump();
+}
+
 // ---------------- People ----------------
 function clusterNamed(c){ return c.members.some(m=>faceState[m.face_id].decision==="keep" && faceState[m.face_id].person); }
-function nameCluster(cid,val){
-  const c = PEOPLE.clusters.find(x=>x.cluster_id===cid); if(!c) return;
-  val = val.trim();
-  for(const m of c.members){ const st=faceState[m.face_id];
-    if(val){ st.person=val; if(st.decision!=="skip") st.decision="keep"; }
-    else { st.person=""; if(st.decision==="keep") st.decision=""; }
-  }
-  dirty.people=true; persist(); renderPeople();
+function clusterAttn(c){ return c.members.some(m=>m.edge) || !clusterNamed(c); }
+function faceHtml(m){ const st=faceState[m.face_id];
+  return '<div class="face'+(m.edge?" edge":"")+(st.decision==="skip"?" eject":"")+'" data-fid="'+m.face_id+'">'+thumbHtml(m)
+    +'<div class="p">'+(m.edge?'<span class="flag">&#9888;</span> ':"")+Math.round(m.prob*100)+'%</div>'
+    +'<button class="ej" type="button">'+(st.decision==="skip"?"undo":"eject")+'</button></div>'; }
+function noiseHtml(m){ const st=faceState[m.face_id];
+  return '<div class="face" data-fid="'+m.face_id+'">'+thumbHtml(m)
+    +'<input class="name" list="persons" style="width:88px" placeholder="name…" value="'+esc(st.person)+'"></div>'; }
+function clusterHtml(c){
+  const cur=(c.members.map(m=>faceState[m.face_id].person).find(Boolean))||"";
+  return '<div class="cluster'+(clusterNamed(c)?" named":"")+(clusterAttn(c)?" needs-attn":"")+'" data-cid="'+c.cluster_id+'">'
+    +'<h3>cluster '+c.cluster_id+' &middot; '+c.size+' faces '
+    +'<input class="name" list="persons" placeholder="name this person…" value="'+esc(cur)+'"></h3>'
+    +'<div class="faces">'+c.members.map(faceHtml).join("")+'</div></div>'; }
+function peopleClusters(){ return attnOnly ? PEOPLE.clusters.filter(clusterAttn) : PEOPLE.clusters; }
+function fillClusters(){
+  const root=document.getElementById("clusters");
+  root.innerHTML='<datalist id="persons">'+PEOPLE.persons.map(p=>'<option value="'+esc(p)+'">').join("")+'</datalist>';
+  infinite(root, peopleClusters(), clusterHtml, 12);
 }
-function ejectFace(fid){ const st=faceState[fid]; st.decision = st.decision==="skip"?"keep":"skip"; dirty.people=true; persist(); renderPeople(); }
-function assignNoise(fid,val){ const st=faceState[fid]; val=val.trim(); st.person=val; st.decision=val?"keep":""; dirty.people=true; persist(); renderPeople(); }
-
 function renderPeople(){
-  const root=document.getElementById("clusters"); root.innerHTML="";
-  const dl='<datalist id="persons">'+PEOPLE.persons.map(p=>'<option value="'+esc(p)+'">').join("")+'</datalist>';
-  let named=0;
-  for(const c of PEOPLE.clusters){
-    const isNamed=clusterNamed(c); if(isNamed) named++;
-    const needsAttn = c.members.some(m=>m.edge) || !isNamed;
-    if(attnOnly && !needsAttn) continue;
-    const cur = (c.members.map(m=>faceState[m.face_id].person).find(Boolean))||"";
-    let faces="";
-    for(const m of c.members){ const st=faceState[m.face_id];
-      faces+='<div class="face'+(m.edge?" edge":"")+(st.decision==="skip"?" eject":"")+'">'+thumbHtml(m)
-        +'<div class="p">'+(m.edge?'<span class="flag">&#9888;</span> ':"")+Math.round(m.prob*100)+'%</div>'
-        +'<button class="ej" onclick="pf.eject('+m.face_id+')">'+(st.decision==="skip"?"undo":"eject")+'</button></div>';
-    }
-    const div=document.createElement("div"); div.className="cluster"+(isNamed?" named":"");
-    div.innerHTML='<h3>cluster '+c.cluster_id+' &middot; '+c.size+' faces '
-      +'<input class="name" list="persons" placeholder="name this person…" value="'+esc(cur)+'" '
-      +'onchange="pf.name('+c.cluster_id+',this.value)"></h3><div class="faces">'+faces+'</div>';
-    root.appendChild(div);
-  }
-  root.insertAdjacentHTML("beforeend",dl);
-  // noise pool
-  const nz=document.getElementById("noise"); nz.innerHTML="";
-  for(const m of PEOPLE.noise){ const st=faceState[m.face_id];
-    nz.insertAdjacentHTML("beforeend",'<div class="face">'+thumbHtml(m)
-      +'<input class="name" list="persons" style="width:88px" placeholder="name…" value="'+esc(st.person)+'" '
-      +'onchange="pf.assign('+m.face_id+',this.value)"></div>');
-  }
-  document.getElementById("people-progress").textContent="named "+named+" / "+PEOPLE.clusters.length+" clusters";
-  mark("people");
+  if(peopleRendered) return; peopleRendered=true;
+  fillClusters();
+  infinite(document.getElementById("noise"), PEOPLE.noise, noiseHtml, 80);
+  updateProgress();
 }
+function updateProgress(){ let n=0; for(const c of PEOPLE.clusters) if(clusterNamed(c)) n++;
+  document.getElementById("people-progress").textContent="named "+n+" / "+PEOPLE.clusters.length+" clusters"; }
 
 // ---------------- Tags ----------------
-function toggleTagPhoto(fid,tag){ const k=fid+"|"+tag; tagState[k]=tagState[k]==="keep"?"":"keep"; dirty.tags=true; persist(); renderTags(); }
-function toggleBlacklist(tag){ if(blacklist.has(tag)) blacklist.delete(tag); else blacklist.add(tag); dirty.tags=true; persist(); renderTags(); }
+function renderAutoSummary(){
+  document.getElementById("autosummary").innerHTML=TAGS.autoSummary.map(s=>
+    '<span class="chip'+(blacklist.has(s.tag)?" bl":"")+'" data-tag="'+esc(s.tag)+'">'+esc(s.tag)+' ('+s.count+')</span>').join(""); }
+function tagPhotoHtml(p,tag){ const d=tagState[p.file_id+"|"+tag]||"";
+  return '<div class="tp'+(d==="keep"?" keep":"")+'" data-fid="'+p.file_id+'">'
+    +(p.thumb?'<img loading="lazy" decoding="async" src="'+esc(p.thumb)+'">':'<div class="s" style="height:84px;line-height:84px">no img</div>')
+    +'<div class="s">'+(p.score!=null?Math.round(p.score*100)+"%":"")+'</div></div>'; }
+function tagGroupHtml(g){
+  return '<div class="tag" data-tag="'+esc(g.tag)+'"><h3>'+esc(g.tag)+' &middot; '+g.count+' photo(s)'
+    +'<span class="blnote">'+(blacklist.has(g.tag)?"blacklisted":"")+'</span></h3>'
+    +'<div class="photos">'+g.photos.map(p=>tagPhotoHtml(p,g.tag)).join("")+'</div></div>'; }
 function renderTags(){
-  const sum=document.getElementById("autosummary"); sum.innerHTML="";
-  for(const s of TAGS.autoSummary)
-    sum.insertAdjacentHTML("beforeend",'<span class="chip'+(blacklist.has(s.tag)?" bl":"")+'" onclick="pf.bl('+JSON.stringify(s.tag)+')">'+esc(s.tag)+' ('+s.count+')</span>');
-  const root=document.getElementById("reviewtags"); root.innerHTML="";
-  for(const g of TAGS.reviewTags){
-    let photos="";
-    for(const p of g.photos){ const d=tagState[p.file_id+"|"+g.tag]||"";
-      photos+='<div class="tp '+(d==="keep"?"keep":"")+'" onclick="pf.tp('+p.file_id+','+JSON.stringify(g.tag)+')">'
-        +(p.thumb?'<img src="'+esc(p.thumb)+'">':'<div class="s" style="height:84px;line-height:84px">no img</div>')
-        +'<div class="s">'+(p.score!=null?Math.round(p.score*100)+"%":"")+'</div></div>';
-    }
-    root.insertAdjacentHTML("beforeend",'<div class="tag"><h3>'+esc(g.tag)+' &middot; '+g.count+' photo(s)'
-      +(blacklist.has(g.tag)?' <span class="flag">blacklisted</span>':"")+'</h3><div class="photos">'+photos+'</div></div>');
-  }
+  if(tagsRendered) return; tagsRendered=true;
+  renderAutoSummary();
+  // batch=1: the first groups are the largest (sorted by count), so render one at a time and
+  // let the height check stop early instead of building several huge groups up front.
+  infinite(document.getElementById("reviewtags"), TAGS.reviewTags, tagGroupHtml, 1);
   mark("tags");
 }
 
@@ -455,9 +474,47 @@ async function save(which){
 }
 function tab(which){
   for(const t of ["people","tags"]){ document.getElementById("pane-"+t).classList.toggle("active",t===which); document.getElementById("tab-"+t).classList.toggle("active",t===which); }
+  scrollTo(0,0);  // each pane starts at the top so the lazy fill is predictable
+  if(which==="tags") renderTags(); else renderPeople();
 }
-document.getElementById("attn").onchange=(e)=>{attnOnly=e.target.checked; renderPeople();};
-window.pf={name:nameCluster, eject:ejectFace, assign:assignNoise, tp:toggleTagPhoto, bl:toggleBlacklist, facesCsv, tagsCsv};
+// Event delegation: one listener per container handles every (lazily-built) child, so naming,
+// ejecting, tag-keep and blacklist work no matter when a node is materialized by scrolling.
+document.getElementById("clusters").addEventListener("click",e=>{
+  const b=e.target.closest(".ej"); if(!b) return;
+  const face=b.closest(".face"), st=faceState[face.dataset.fid];
+  st.decision = st.decision==="skip"?"keep":"skip"; dirty.people=true; persist();
+  const ej=st.decision==="skip"; face.classList.toggle("eject",ej); b.textContent=ej?"undo":"eject"; mark("people");
+});
+document.getElementById("clusters").addEventListener("change",e=>{
+  const inp=e.target.closest("input.name"); if(!inp) return;
+  const cl=inp.closest(".cluster"), c=PEOPLE.clusters.find(x=>String(x.cluster_id)===cl.dataset.cid); if(!c) return;
+  const val=inp.value.trim();
+  for(const m of c.members){ const st=faceState[m.face_id];
+    if(val){ st.person=val; if(st.decision!=="skip") st.decision="keep"; }
+    else { st.person=""; if(st.decision==="keep") st.decision=""; } }
+  dirty.people=true; persist();
+  cl.classList.toggle("named",clusterNamed(c)); cl.classList.toggle("needs-attn",clusterAttn(c));
+  updateProgress(); mark("people");
+});
+document.getElementById("noise").addEventListener("change",e=>{
+  const inp=e.target.closest("input.name"); if(!inp) return;
+  const st=faceState[inp.closest(".face").dataset.fid], val=inp.value.trim();
+  st.person=val; st.decision=val?"keep":""; dirty.people=true; persist(); mark("people");
+});
+document.getElementById("reviewtags").addEventListener("click",e=>{
+  const tp=e.target.closest(".tp"); if(!tp) return;
+  const k=tp.dataset.fid+"|"+tp.closest(".tag").dataset.tag;
+  tagState[k]=tagState[k]==="keep"?"":"keep"; dirty.tags=true; persist();
+  tp.classList.toggle("keep",tagState[k]==="keep"); mark("tags");
+});
+document.getElementById("autosummary").addEventListener("click",e=>{
+  const chip=e.target.closest(".chip"); if(!chip) return;
+  const tag=chip.dataset.tag; if(blacklist.has(tag)) blacklist.delete(tag); else blacklist.add(tag);
+  dirty.tags=true; persist(); chip.classList.toggle("bl",blacklist.has(tag));
+  for(const el of document.querySelectorAll("#reviewtags .tag")) if(el.dataset.tag===tag){ const n=el.querySelector(".blnote"); if(n) n.textContent=blacklist.has(tag)?"blacklisted":""; break; }
+  mark("tags");
+});
+document.getElementById("attn").onchange=e=>{ attnOnly=e.target.checked; fillClusters(); };
 window.ui={tab, save};
-renderPeople(); renderTags();
+renderPeople(); // People is the active tab; Tags renders lazily on first open
 </script></body></html>"""
