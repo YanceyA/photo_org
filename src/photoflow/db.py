@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS faces (
     person_id INTEGER,         -- DURABLE assignment (NULL = unassigned)
     cluster_id INTEGER,        -- EPHEMERAL: last cluster run (NULL = noise/assigned)
     cluster_prob REAL,         -- HDBSCAN membership prob; low = edge case for review
+    ignored INTEGER DEFAULT 0, -- DURABLE "not interested": excluded from re-cluster/review
     thumb TEXT,                -- relative path to face-crop thumbnail
     FOREIGN KEY(file_id) REFERENCES files(id),
     FOREIGN KEY(person_id) REFERENCES persons(id)
@@ -107,11 +108,21 @@ CREATE TABLE IF NOT EXISTS enrich_state (   -- incremental skip, like scan's siz
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for DBs created before a column existed (CREATE TABLE
+    IF NOT EXISTS can't add columns to a table that already exists)."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(faces)")}
+    if "ignored" not in cols:
+        conn.execute("ALTER TABLE faces ADD COLUMN ignored INTEGER DEFAULT 0")
+        conn.commit()
+
+
 def open_db(workdir: Path) -> sqlite3.Connection:
     workdir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(workdir / "photoflow.db")
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     if conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 0:
         conn.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
         conn.commit()

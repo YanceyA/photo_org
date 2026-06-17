@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import json
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +52,22 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
         if face_is_applied(row.get("person", ""), row.get("decision", "")):
             pid = _upsert_person(conn, row["person"].strip())
             conn.execute("UPDATE faces SET person_id=? WHERE id=?", (pid, int(row["face_id"])))
+
+    # 1b. "not interested" clusters: a cluster whose every member is skipped (none named) was
+    # dismissed wholesale in the page -> mark its faces ignored so re-cluster/review drop them
+    # for good. A lone skip inside an otherwise-named cluster is just an eject, left eligible.
+    by_cluster: dict[str, list[dict]] = defaultdict(list)
+    for row in face_csv:
+        cid = (row.get("cluster_id") or "").strip()
+        if cid:
+            by_cluster[cid].append(row)
+    for members in by_cluster.values():
+        if all((m.get("decision") or "") == "skip" for m in members):
+            for m in members:
+                conn.execute(
+                    "UPDATE faces SET ignored=1, cluster_id=NULL, cluster_prob=NULL WHERE id=?",
+                    (int(m["face_id"]),),
+                )
     if not dry:
         conn.commit()
 

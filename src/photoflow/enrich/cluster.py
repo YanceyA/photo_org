@@ -14,10 +14,14 @@ from photoflow.enrich.clustering import cluster_embeddings
 def cmd_enrich_cluster(conn, workdir, run_id, log_fh, args, cfg):
     import numpy as np
 
-    # reset ephemeral cluster state for everything still unassigned
-    conn.execute("UPDATE faces SET cluster_id=NULL, cluster_prob=NULL WHERE person_id IS NULL")
+    # reset ephemeral cluster state for everything still unassigned (ignored faces are excluded:
+    # "not interested" is durable, like a person assignment, so they never re-cluster)
+    conn.execute(
+        "UPDATE faces SET cluster_id=NULL, cluster_prob=NULL WHERE person_id IS NULL AND ignored=0"
+    )
     rows = conn.execute(
-        "SELECT id, embedding FROM faces WHERE person_id IS NULL AND embedding IS NOT NULL"
+        "SELECT id, embedding FROM faces "
+        "WHERE person_id IS NULL AND ignored=0 AND embedding IS NOT NULL"
     ).fetchall()
 
     # Guard against malformed embedding BLOBs (e.g. a physically damaged DB): frombuffer
@@ -50,6 +54,7 @@ def cmd_enrich_cluster(conn, workdir, run_id, log_fh, args, cfg):
         embs,
         min_cluster_size=cfg.enrich_min_cluster_size,
         min_samples=cfg.enrich_min_samples or None,
+        cluster_selection_epsilon=cfg.enrich_cluster_selection_epsilon,
     )
     for (face_id, _v), label, prob in zip(vecs, labels, probs):  # noqa: B905 (equal lengths)
         conn.execute(

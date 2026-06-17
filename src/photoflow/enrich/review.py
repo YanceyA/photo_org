@@ -76,7 +76,7 @@ def cmd_enrich_review(conn, workdir, run_id, log_fh, args, cfg):
         """SELECT fa.id face_id, fa.file_id, fa.cluster_id, fa.cluster_prob, fa.thumb,
                   fa.embedding, f.dest_path
            FROM faces fa JOIN files f ON f.id = fa.file_id
-           WHERE fa.person_id IS NULL ORDER BY fa.cluster_id"""
+           WHERE fa.person_id IS NULL AND fa.ignored=0 ORDER BY fa.cluster_id"""
     ):
         sug = ""
         if centroids and r["embedding"] is not None:

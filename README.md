@@ -152,13 +152,44 @@ CUDA stack.
 uv run photoflow enrich scan      # detect faces + tag content (GPU/CPU, incremental)
 uv run photoflow enrich cluster   # group unassigned faces into per-person clusters
 uv run photoflow enrich review    # open photoflow_work/enrich_review.html
-# ... name clusters, eject any ⚠ mis-grouped faces, confirm edge tags, Save both CSVs ...
+# ... name clusters, eject any ⚠ mis-grouped faces, "not interested" on don't-care clusters,
+#     confirm edge tags, Save both CSVs ...
 uv run photoflow enrich apply [--dry-run]   # write XMP into the library files / sidecars
 uv run photoflow enrich status
 ```
 
 `enrich scan`/`apply` are incremental and idempotent — run them again after importing more
 photos and only the new files are processed.
+
+In the **review page**: naming a cluster labels everyone in it; **eject** removes a single
+mis-grouped face (it stays eligible for re-grouping); **not interested** dismisses a whole
+cluster you don't care to tag — on the next `apply` those faces are marked *ignored* and never
+resurface in re-cluster or review again.
+
+### Improving face grouping (re-cluster loop)
+
+Clustering is unsupervised, so it can split one person across separate bursts and leave
+infrequent faces unassigned. Once you've named some people, turn that into supervision and
+re-group the rest — each round gets stronger as you name more:
+
+```
+uv run photoflow enrich apply               # bake named clusters into durable person_ids
+uv run photoflow enrich assign [--dry-run]  # Layer 0: auto-assign unassigned faces that are
+                                            #   near a named person's centroid (mops up
+                                            #   burst-fragments + noise of known people)
+uv run photoflow enrich cluster             # Layer 1/2: regroup only the still-unnamed faces
+uv run photoflow enrich review              # confirm, name more, repeat
+```
+
+`enrich assign` only touches unassigned, non-ignored faces, so confirmed names and
+"not interested" faces are never disturbed. Tune its bar with `--min-sim` (default
+`enrich_auto_assign_threshold = 0.6`).
+
+To fight per-burst over-splitting, raise `enrich_cluster_selection_epsilon` (Layer 1) in
+`photoflow.toml` — it fuses clusters closer than that cosine distance into one person. Start
+small (`0.1`–`0.3`) and verify it never merges two *distinct* named people. To recover people
+who appear in only a few photos (Layer 2), lower `enrich_min_cluster_size` (e.g. `3`). Your
+already-named faces are ground truth — sweep these knobs and check no two named people merge.
 
 ### What gets written
 

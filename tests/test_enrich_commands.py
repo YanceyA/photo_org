@@ -16,6 +16,7 @@ from PIL import Image
 from photoflow.config import Config
 from photoflow.db import new_run, open_db
 from photoflow.enrich import apply as eapply
+from photoflow.enrich import assign as eassign
 from photoflow.enrich import cluster as ecluster
 from photoflow.enrich import deps as edeps
 from photoflow.enrich import faces as efaces
@@ -103,6 +104,31 @@ def test_scan_stores_faces_tags_and_is_incremental(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- cluster
 
 
+FACE_COLS = [
+    "cluster_id",
+    "face_id",
+    "file_id",
+    "source_path",
+    "cluster_prob",
+    "suggested_person",
+    "person",
+    "decision",
+]
+
+
+def _face_row(cluster_id, face_id, file_id, person="", decision=""):
+    return {
+        "cluster_id": cluster_id,
+        "face_id": face_id,
+        "file_id": file_id,
+        "source_path": "x",
+        "cluster_prob": 0.9,
+        "suggested_person": "",
+        "person": person,
+        "decision": decision,
+    }
+
+
 def _insert_face(conn, file_id, which, person_id=None):
     v = np.zeros(512, dtype=np.float32)
     v[which] = 1.0
@@ -145,6 +171,37 @@ def test_cluster_groups_unassigned_and_preserves_named(tmp_path):
 
 
 # --------------------------------------------------------------------------- review
+
+
+def test_cluster_passes_selection_epsilon_from_config(tmp_path, monkeypatch):
+    # Layer 1 knob: cluster_selection_epsilon merges adjacent burst-fragment clusters of one
+    # person. cluster_embeddings already accepts it; this guards that the command threads the
+    # configured value through (default 0.0 keeps today's behavior).
+    from dataclasses import replace
+
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    for _ in range(6):
+        _insert_face(conn, fid, which=0)
+    for _ in range(6):
+        _insert_face(conn, fid, which=300)
+    conn.commit()
+
+    captured: dict = {}
+    real = ecluster.cluster_embeddings
+
+    def spy(embs, **kw):
+        captured.update(kw)
+        return real(embs, **kw)
+
+    monkeypatch.setattr(ecluster, "cluster_embeddings", spy)
+    cfg = replace(Config(), enrich_cluster_selection_epsilon=0.35)
+    run_id = new_run(conn, "enrich", {})
+    logs = workdir / "logs"
+    logs.mkdir(exist_ok=True)
+    with open(logs / f"run_{run_id}.jsonl", "a", encoding="utf-8") as fh:
+        ecluster.cmd_enrich_cluster(conn, workdir, run_id, fh, types.SimpleNamespace(), cfg)
+    assert captured["cluster_selection_epsilon"] == 0.35
 
 
 def test_cluster_skips_malformed_embeddings(tmp_path):
@@ -448,6 +505,156 @@ def test_apply_real_exiftool_roundtrip(tmp_path):
     names = rec.get("RegionName")
     names = [names] if isinstance(names, str) else (names or [])
     assert "Mum" in names
+
+
+# ----------------------------------------------------- assign (centroid label propagation)
+
+
+def _make_person(conn, name, file_id, which, n=5):
+    conn.execute("INSERT INTO persons(name, created) VALUES (?, '')", (name,))
+    pid = conn.execute("SELECT id FROM persons WHERE name=?", (name,)).fetchone()["id"]
+    for _ in range(n):
+        _insert_face(conn, file_id, which=which, person_id=pid)
+    return pid
+
+
+def test_assign_propagates_named_centroid_to_near_faces(tmp_path):
+    # An unassigned face near a named person's centroid is auto-assigned; a far face is left
+    # for clustering. This mops up burst-fragments + noise of people you've already named.
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    pid = _make_person(conn, "Mum", fid, which=0)
+    _insert_face(conn, fid, which=0)  # near Mum's centroid -> assign
+    _insert_face(conn, fid, which=300)  # far -> leave unassigned
+    conn.commit()
+    unassigned = [r["id"] for r in conn.execute("SELECT id FROM faces WHERE person_id IS NULL")]
+
+    _run(eassign.cmd_enrich_assign, conn, workdir, dry_run=False, min_sim=None)
+
+    persons_now = {
+        r["id"]: r["person_id"]
+        for r in conn.execute("SELECT id, person_id FROM faces WHERE id IN (?,?)", unassigned)
+    }
+    assigned = [fidx for fidx, p in persons_now.items() if p == pid]
+    left = [fidx for fidx, p in persons_now.items() if p is None]
+    assert len(assigned) == 1 and len(left) == 1  # near -> Mum, far -> still unassigned
+
+
+def test_assign_skips_ignored_faces(tmp_path):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    _make_person(conn, "Mum", fid, which=0)
+    _insert_face(conn, fid, which=0)  # near Mum but marked "not interested"
+    ignored_id = conn.execute("SELECT MAX(id) m FROM faces").fetchone()["m"]
+    conn.execute("UPDATE faces SET ignored=1 WHERE id=?", (ignored_id,))
+    conn.commit()
+
+    _run(eassign.cmd_enrich_assign, conn, workdir, dry_run=False, min_sim=None)
+    row = conn.execute("SELECT person_id FROM faces WHERE id=?", (ignored_id,)).fetchone()
+    assert row["person_id"] is None
+
+
+def test_assign_dry_run_changes_nothing(tmp_path):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    _make_person(conn, "Mum", fid, which=0)
+    _insert_face(conn, fid, which=0)
+    target = conn.execute("SELECT MAX(id) m FROM faces").fetchone()["m"]
+    conn.commit()
+
+    _run(eassign.cmd_enrich_assign, conn, workdir, dry_run=True, min_sim=None)
+    assert (
+        conn.execute("SELECT person_id FROM faces WHERE id=?", (target,)).fetchone()["person_id"]
+        is None
+    )
+
+
+def test_assign_without_persons_is_graceful(tmp_path):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    _insert_face(conn, ids[0], which=0)
+    conn.commit()
+    _run(eassign.cmd_enrich_assign, conn, workdir, dry_run=False, min_sim=None)  # must not raise
+
+
+# ----------------------------------------------------- "not interested" faces stay gone
+
+
+def test_apply_marks_fully_dismissed_cluster_ignored(tmp_path, monkeypatch):
+    # A cluster the user dismissed ("not interested") arrives as all-skip rows in faces.csv:
+    # apply must mark those faces ignored (durable) so re-cluster/review never resurfaces them.
+    # A single ejected face inside an otherwise-named cluster is NOT a dismiss -> stays eligible.
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    for _ in range(3):
+        _insert_face(conn, fid, which=0)  # cluster 1: dismissed
+    _insert_face(conn, fid, which=10)  # cluster 2: named
+    _insert_face(conn, fid, which=11)  # cluster 2: ejected member
+    conn.commit()
+    face_ids = [r["id"] for r in conn.execute("SELECT id FROM faces ORDER BY id")]
+    c1, c2 = face_ids[:3], face_ids[3:]
+
+    _write_csv(
+        workdir / "faces.csv",
+        FACE_COLS,
+        [_face_row(1, f, fid, decision="skip") for f in c1]
+        + [_face_row(2, c2[0], fid, person="Mum", decision="keep")]
+        + [_face_row(2, c2[1], fid, decision="skip")],
+    )
+    _write_csv(
+        workdir / "tags.csv", ["file_id", "tag", "source", "score", "suggestion", "decision"], []
+    )
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", lambda lines: None)
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False)
+
+    for f in c1:
+        row = conn.execute("SELECT ignored, person_id FROM faces WHERE id=?", (f,)).fetchone()
+        assert row["ignored"] == 1 and row["person_id"] is None  # gone for good, never named
+    # the lone ejected face in the named cluster is NOT ignored -> can be re-clustered later
+    assert conn.execute("SELECT ignored FROM faces WHERE id=?", (c2[1],)).fetchone()["ignored"] == 0
+    assert conn.execute("SELECT person_id FROM faces WHERE id=?", (c2[0],)).fetchone()["person_id"]
+
+
+def test_cluster_excludes_ignored_faces(tmp_path):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    for _ in range(6):  # two kept identities (HDBSCAN needs contrast to form clusters)
+        _insert_face(conn, fid, which=0)
+    for _ in range(6):
+        _insert_face(conn, fid, which=300)
+    for _ in range(6):  # a third identity the user marked "not interested"
+        _insert_face(conn, fid, which=100)
+    conn.commit()
+    all_ids = [r["id"] for r in conn.execute("SELECT id FROM faces ORDER BY id")]
+    ignored = all_ids[12:]
+    for f in ignored:
+        conn.execute("UPDATE faces SET ignored=1 WHERE id=?", (f,))
+    conn.commit()
+
+    _run(ecluster.cmd_enrich_cluster, conn, workdir)
+
+    for f in ignored:
+        assert (
+            conn.execute("SELECT cluster_id FROM faces WHERE id=?", (f,)).fetchone()["cluster_id"]
+            is None
+        )  # ignored faces never get clustered
+    live = [r["cluster_id"] for r in conn.execute("SELECT cluster_id FROM faces WHERE ignored=0")]
+    assert len({lbl for lbl in live if lbl is not None}) == 2  # only the kept identities cluster
+
+
+def test_review_excludes_ignored_faces(tmp_path):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    for _ in range(5):
+        _insert_face(conn, fid, which=0)
+    conn.execute("UPDATE faces SET cluster_id=1, cluster_prob=0.9")
+    ignored = conn.execute("SELECT MIN(id) m FROM faces").fetchone()["m"]
+    conn.execute("UPDATE faces SET ignored=1 WHERE id=?", (ignored,))
+    conn.commit()
+
+    _run(ereview.cmd_enrich_review, conn, workdir)
+    rows = list(csv.DictReader((workdir / "faces.csv").open(encoding="utf-8")))
+    assert {int(r["face_id"]) for r in rows} and ignored not in {int(r["face_id"]) for r in rows}
 
 
 # --------------------------------------------------------------------------- status

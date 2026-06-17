@@ -43,9 +43,16 @@ class Config:
     enrich_batch: int = 16
     enrich_face_min_score: float = 0.55  # InsightFace det_score floor
     enrich_min_cluster_size: int = 5  # HDBSCAN: min faces to call a cluster a person
+    # lower (e.g. 3) to recover people who appear in only a few photos (Layer 2); higher to
+    # demand denser evidence. Tune in photoflow.toml; calibrate against your named faces.
     enrich_min_samples: int = 0  # HDBSCAN min_samples; 0 => None (= min_cluster_size)
+    # >0 merges clusters closer than this (cosine-equivalent) distance, fusing the per-burst
+    # fragments of one person into a single cluster (Layer 1). Default 0 = today's behavior;
+    # raise gradually (e.g. 0.1-0.3) and check it never merges two distinct named people.
+    enrich_cluster_selection_epsilon: float = 0.0
     enrich_cluster_prob_floor: float = 0.5  # member prob below this = edge case for review
     enrich_assign_threshold: float = 0.5  # cosine sim to auto-suggest a new face to a named person
+    enrich_auto_assign_threshold: float = 0.6  # higher bar for `enrich assign` to COMMIT a label
     face_crop_pad: float = 0.3  # padding around bbox when writing the review thumbnail
     # SigLIP2 sigmoid scores are low and vary ~100x BY TAG: on the Open Images calibration set
     # prominent subjects score ~0.10 (cat, cake) while correct-but-low-scale tags score

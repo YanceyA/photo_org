@@ -9,6 +9,7 @@ from photoflow.apply import cmd_apply
 from photoflow.config import load_config
 from photoflow.db import new_run, open_db
 from photoflow.enrich.apply import cmd_enrich_apply
+from photoflow.enrich.assign import cmd_enrich_assign
 from photoflow.enrich.cluster import cmd_enrich_cluster
 from photoflow.enrich.review import cmd_enrich_review
 from photoflow.enrich.scan import cmd_enrich_scan
@@ -21,6 +22,7 @@ from photoflow.status import cmd_status
 ENRICH_COMMANDS = {
     "scan": cmd_enrich_scan,
     "cluster": cmd_enrich_cluster,
+    "assign": cmd_enrich_assign,
     "review": cmd_enrich_review,
     "apply": cmd_enrich_apply,
     "status": cmd_enrich_status,
@@ -52,6 +54,11 @@ def main():
     esub = enrich.add_subparsers(dest="enrich_step", required=True)
     esub.add_parser("scan", help="detect faces + content tags for copied library images")
     esub.add_parser("cluster", help="group unassigned faces into per-person clusters")
+    eas = esub.add_parser("assign", help="auto-assign unassigned faces to already-named people")
+    eas.add_argument("--dry-run", action="store_true", help="report what would be assigned only")
+    eas.add_argument(
+        "--min-sim", type=float, default=None, help="cosine-sim threshold to commit (default cfg)"
+    )
     esub.add_parser("review", help="export enrich_review.html + faces.csv + tags.csv")
     ea = esub.add_parser("apply", help="write confirmed people + tags into the library files")
     ea.add_argument("--dry-run", action="store_true")
