@@ -103,3 +103,24 @@ def keyword_argfile_lines(
             lines.append("-XMP-lr:HierarchicalSubject=")
             lines += [f"-XMP-lr:HierarchicalSubject={prefix}|{p}" for p in people]
     return lines
+
+
+def keyword_remove_argfile_lines(
+    values: Iterable[str], *, iptc: bool = True, people_prefix: str = "People"
+) -> list[str]:
+    """exiftool '-=' lines that delete each value from the keyword + people lists.
+
+    apply unions keywords (never drops), so a person name that was renamed/merged lingers in
+    dc:Subject / IPTC:Keywords on already-applied files. '-=' removes that exact list value and
+    is a NO-OP when it's absent, so this strips only the named stale values and never disturbs
+    other keywords. Returns just the tag lines; the caller appends -overwrite_original/target.
+    """
+    lines: list[str] = []
+    for v in values:
+        lines.append(f"-XMP-dc:Subject-={v}")
+        if iptc:
+            lines.append(f"-IPTC:Keywords-={v}")
+        lines.append(f"-XMP-iptcExt:PersonInImage-={v}")
+        if people_prefix:
+            lines.append(f"-XMP-lr:HierarchicalSubject-={people_prefix}|{v}")
+    return lines

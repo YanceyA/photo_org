@@ -4,6 +4,7 @@ import pytest
 
 from photoflow.enrich.regions import (
     keyword_argfile_lines,
+    keyword_remove_argfile_lines,
     normalized_region,
     region_argfile_lines,
 )
@@ -17,6 +18,24 @@ def test_normalized_region_center_and_size():
     assert cy == pytest.approx(0.25)  # (100+400)/2 / 1000
     assert w == pytest.approx(0.2)  # (300-100)/1000
     assert h == pytest.approx(0.3)  # (400-100)/1000
+
+
+def test_keyword_remove_argfile_lines_strips_value_from_every_list():
+    # After merging a misspelled person, the stale name lingers as a plain keyword (apply only
+    # unions, never drops). exiftool '-=' deletes that exact value from each list and is a no-op
+    # when absent, so it strips only the named values and never disturbs other keywords.
+    lines = keyword_remove_argfile_lines(["Deidre Hough"], iptc=True, people_prefix="People")
+    assert "-XMP-dc:Subject-=Deidre Hough" in lines
+    assert "-IPTC:Keywords-=Deidre Hough" in lines
+    assert "-XMP-iptcExt:PersonInImage-=Deidre Hough" in lines
+    assert "-XMP-lr:HierarchicalSubject-=People|Deidre Hough" in lines
+
+
+def test_keyword_remove_argfile_lines_honours_toggles():
+    bare = keyword_remove_argfile_lines(["x"], iptc=False, people_prefix="")
+    assert "-IPTC:Keywords-=x" not in bare  # iptc off
+    assert not any("HierarchicalSubject" in line for line in bare)  # no prefix -> no hierarchy
+    assert "-XMP-dc:Subject-=x" in bare and "-XMP-iptcExt:PersonInImage-=x" in bare
 
 
 def test_normalized_region_clamps_out_of_bounds():
