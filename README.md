@@ -185,6 +185,18 @@ uv run photoflow enrich review              # confirm, name more, repeat
 "not interested" faces are never disturbed. Tune its bar with `--min-sim` (default
 `enrich_auto_assign_threshold = 0.6`).
 
+**Picking `--min-sim`:** every run writes a static `assign_review_sim<val>.html` to the workdir
+that shows each *proposed* face grouped under the person it would join (strongest match first,
+cosine score under each) next to a strip of that person's known faces. Generate a few at
+different thresholds and open them side by side — pick the value just above where wrong faces
+start to appear. The counts alone won't tell you that; the page will.
+
+```
+uv run photoflow enrich assign --dry-run --min-sim 0.6   # -> assign_review_sim0.60.html
+uv run photoflow enrich assign --dry-run --min-sim 0.5   # -> assign_review_sim0.50.html
+uv run photoflow enrich assign --dry-run --min-sim 0.45  # -> assign_review_sim0.45.html
+```
+
 To fight per-burst over-splitting, raise `enrich_cluster_selection_epsilon` (Layer 1) in
 `photoflow.toml` — it fuses clusters closer than that cosine distance into one person. Start
 small (`0.1`–`0.3`) and verify it never merges two *distinct* named people. To recover people

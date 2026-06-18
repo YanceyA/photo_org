@@ -569,6 +569,23 @@ def test_assign_dry_run_changes_nothing(tmp_path):
     )
 
 
+def test_assign_writes_review_html_named_by_threshold(tmp_path):
+    # The dry-run must emit a static assign_review_sim<val>.html so the user can eyeball which
+    # proposed faces are wrong at a given --min-sim (counts alone can't show that).
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    _make_person(conn, "Mum", fid, which=0)
+    _insert_face(conn, fid, which=0)  # exact match -> sim 1.00
+    conn.commit()
+
+    _run(eassign.cmd_enrich_assign, conn, workdir, dry_run=True, min_sim=0.5)
+
+    htmls = list(workdir.glob("assign_review_sim0.50.html"))
+    assert htmls, "dry-run should write a threshold-named review page"
+    text = htmls[0].read_text(encoding="utf-8")
+    assert "Mum" in text and "1.00" in text  # proposed face grouped under Mum at sim 1.00
+
+
 def test_assign_without_persons_is_graceful(tmp_path):
     conn, workdir, lib, ids = _seed(tmp_path, n=1)
     _insert_face(conn, ids[0], which=0)

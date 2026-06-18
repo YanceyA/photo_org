@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import csv
 import json
+from html import escape
 from pathlib import Path
 
 FACE_COLUMNS = [
@@ -222,6 +223,78 @@ def build_tags_payload(items: list, rows: list[dict], workdir_key: str) -> dict:
         reverse=True,
     )
     return {"workdir": workdir_key, "reviewTags": review, "autoSummary": summary}
+
+
+def _assign_thumb(item: dict) -> str:
+    thumb = item.get("thumb")
+    if not thumb:
+        return '<span class="noimg">no img</span>'
+    img = f'<img loading="lazy" decoding="async" src="{escape(str(thumb))}" alt="">'
+    uri = item.get("uri")
+    return (
+        f'<a href="{escape(str(uri))}" target="_blank" title="open original">{img}</a>'
+        if uri
+        else img
+    )
+
+
+def render_assign_review(min_sim: float, total: int, persons: list[dict]) -> str:
+    """Static review for `enrich assign --dry-run`: each PROPOSED face shown under the person it
+    would be assigned to (strongest match first), with its cosine score, alongside a strip of
+    that person's already-named faces. No JS: generate one per --min-sim and compare to find the
+    threshold just above where wrong faces start appearing. `persons` is pre-sorted by count."""
+    no_refs = '<span class="lbl">(no thumbnails)</span>'
+    sections = []
+    for p in persons:
+        refs = "".join(f'<span class="ref">{_assign_thumb(r)}</span>' for r in p["refs"])
+        cands = "".join(
+            f'<span class="cand">{_assign_thumb(c)}<span class="sim">{c["sim"]:.2f}</span></span>'
+            for c in p["candidates"]
+        )
+        sections.append(
+            f'<section class="person"><h2>{escape(p["name"])}'
+            f'<span class="meta">{p["count"]} proposed &middot; weakest {p["weakest"]:.2f}</span></h2>'
+            f'<div class="known"><span class="lbl">known</span>{refs or no_refs}</div>'
+            f'<div class="cands">{cands}</div></section>'
+        )
+    body = (
+        "".join(sections) or '<p class="lbl" style="margin:24px">No faces reach this threshold.</p>'
+    )
+    return (
+        ASSIGN_TEMPLATE.replace("__MINSIM__", f"{min_sim:.2f}")
+        .replace("__TOTAL__", str(total))
+        .replace("__NPEOPLE__", str(len(persons)))
+        .replace("__BODY__", body)
+    )
+
+
+ASSIGN_TEMPLATE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>enrich assign review (sim &gt;= __MINSIM__)</title>
+<style>
+:root{color-scheme:dark}
+body{font-family:system-ui,sans-serif;background:#111;color:#ddd;margin:0}
+header{position:sticky;top:0;background:#1a1a1a;border-bottom:1px solid #333;padding:10px 16px;z-index:10}
+header h1{font-size:16px;margin:0}
+.hint{font-size:12px;color:#789;margin:6px 0 0}
+.person{border-top:1px solid #333;margin:0;padding:10px 16px}
+.person h2{font-size:15px;color:#9ab;margin:4px 0 8px;display:flex;gap:10px;align-items:baseline}
+.meta{font-size:12px;color:#789;font-weight:normal}
+.known{display:flex;flex-wrap:wrap;gap:6px;align-items:center;background:#161c16;border:1px solid #2a4a2a;border-radius:8px;padding:6px;margin-bottom:8px}
+.lbl{font-size:11px;color:#7a7;text-transform:uppercase;letter-spacing:.05em;margin-right:4px}
+.cands{display:flex;flex-wrap:wrap;gap:8px}
+.ref img{width:64px;height:64px;object-fit:cover;border-radius:4px;border:2px solid #3c3}
+.cand{width:84px;text-align:center}
+.cand img{width:80px;height:80px;object-fit:cover;border-radius:4px;border:2px solid #444}
+.sim{font-size:11px;color:#9ab}
+.noimg{display:inline-block;width:80px;height:80px;line-height:80px;text-align:center;color:#678;font-size:10px;background:#191919;border-radius:4px}
+</style></head><body>
+<header><h1>enrich assign &mdash; proposed matches at cosine &gt;= __MINSIM__</h1>
+<p class="hint">__TOTAL__ faces would be assigned across __NPEOPLE__ people. Each person shows your
+<b>known</b> faces (green) then the proposed matches, <b>strongest first</b>, with the cosine
+score under each. Scan for faces that aren't this person; re-run with a higher
+<code>--min-sim</code> just above where wrong faces start to appear.</p></header>
+__BODY__
+</body></html>"""
 
 
 def render_page(people: dict, tags: dict) -> str:

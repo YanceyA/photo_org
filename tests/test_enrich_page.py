@@ -9,6 +9,7 @@ from photoflow.enrich.page import (
     build_tags_payload,
     face_is_applied,
     face_rows,
+    render_assign_review,
     render_page,
     tag_is_applied,
     tag_rows,
@@ -168,6 +169,33 @@ def test_render_page_renders_lazily_for_big_libraries():
     assert "content-visibility" in html  # off-screen groups skip layout/paint
     # eager full-DOM helpers must be gone (they were the cause of the freeze/OOM)
     assert "renderPeople(); renderTags();" not in html  # both panes no longer build on load
+
+
+def test_render_assign_review_groups_candidates_under_each_person():
+    """The assign dry-run review: a static page that shows each proposed face under the person
+    it would be assigned to, with the cosine score + a strip of that person's known faces, so a
+    human can eyeball where a given --min-sim starts producing wrong matches."""
+    persons = [
+        {
+            "name": "Orlagh Arrington",
+            "count": 2,
+            "weakest": 0.41,
+            "refs": [{"thumb": "faces/1.jpg", "uri": None}],
+            "candidates": [
+                {"thumb": "faces/2.jpg", "uri": None, "sim": 0.59},
+                {"thumb": "faces/3.jpg", "uri": "file:///x.jpg", "sim": 0.41},
+            ],
+        }
+    ]
+    html = render_assign_review(0.5, 2, persons)
+    assert "<!doctype html>" in html.lower()
+    assert "Orlagh Arrington" in html  # grouped under the person
+    assert "0.59" in html and "0.41" in html  # per-face cosine score shown
+    assert ">= 0.5" in html or "0.5" in html  # threshold in the header
+    assert 'loading="lazy"' in html  # thousands of crops load lazily
+    assert "known" in html.lower()  # reference strip of already-named faces
+    # html-escaped, self-contained, no payload injection holes
+    assert "<script" not in html.lower()
 
 
 def test_render_page_has_name_autocomplete_and_ignore_cluster():
