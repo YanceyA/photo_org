@@ -11,6 +11,7 @@ from photoflow.db import new_run, open_db
 from photoflow.enrich.apply import cmd_enrich_apply
 from photoflow.enrich.assign import cmd_enrich_assign
 from photoflow.enrich.cluster import cmd_enrich_cluster
+from photoflow.enrich.merge import cmd_enrich_merge
 from photoflow.enrich.review import cmd_enrich_review
 from photoflow.enrich.scan import cmd_enrich_scan
 from photoflow.enrich.status import cmd_enrich_status
@@ -23,6 +24,7 @@ ENRICH_COMMANDS = {
     "scan": cmd_enrich_scan,
     "cluster": cmd_enrich_cluster,
     "assign": cmd_enrich_assign,
+    "merge": cmd_enrich_merge,
     "review": cmd_enrich_review,
     "apply": cmd_enrich_apply,
     "status": cmd_enrich_status,
@@ -59,6 +61,9 @@ def main():
     eas.add_argument(
         "--min-sim", type=float, default=None, help="cosine-sim threshold to commit (default cfg)"
     )
+    em = esub.add_parser("merge", help="fold duplicate/misspelled person names into one")
+    em.add_argument("canonical", help="the correct name to keep")
+    em.add_argument("aliases", nargs="+", help="duplicate name(s) to fold into canonical")
     esub.add_parser("review", help="export enrich_review.html + faces.csv + tags.csv")
     ea = esub.add_parser("apply", help="write confirmed people + tags into the library files")
     ea.add_argument("--dry-run", action="store_true")

@@ -197,6 +197,19 @@ uv run photoflow enrich assign --dry-run --min-sim 0.5   # -> assign_review_sim0
 uv run photoflow enrich assign --dry-run --min-sim 0.45  # -> assign_review_sim0.45.html
 ```
 
+**Fixing duplicate / misspelled names.** Typing a name before it's in the autocomplete (or with
+different casing — `Yancey Arrington` vs `Yancey arrington`) creates a *separate* person, which
+splits that person's faces and weakens their assign centroid. Fold them back together:
+
+```
+uv run photoflow enrich merge "Deirdre Hough" "Deidre Hough" "Deirdre hough"
+```
+
+The first name is the one to keep (created if it doesn't exist yet); the rest are repointed into
+it and deleted. Re-run `enrich apply` afterwards — it rewrites the people + face-region tags with
+the canonical name. (One caveat: `dc:Subject`/`IPTC:Keywords` are union-only, so a misspelling
+already written into *previously applied* files lingers as a plain keyword until cleaned out.)
+
 To fight per-burst over-splitting, raise `enrich_cluster_selection_epsilon` (Layer 1) in
 `photoflow.toml` — it fuses clusters closer than that cosine distance into one person. Start
 small (`0.1`–`0.3`) and verify it never merges two *distinct* named people. To recover people

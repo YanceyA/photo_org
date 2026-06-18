@@ -18,7 +18,7 @@ uv run photoflow <cmd>                     # or: python -m photoflow <cmd>
 just test / just lint / just fmt / just run <cmd>
 ```
 
-App subcommands: `scan <SRC> [SRC ...]`, `plan`, `review`, `apply --out <DIR> [--dry-run]`, `status`. Plus the optional **enrich** subsystem (nested): `enrich scan|cluster|review|apply|status` — faces (InsightFace→HDBSCAN) + content tags (RAM++/CLIP) written into the *already-copied* library as portable XMP. Gated behind `pip install -e .[enrich]`; degrades gracefully when the model stack is absent. Design: `docs/plans/2026-06-13-enrich-design.md`.
+App subcommands: `scan <SRC> [SRC ...]`, `plan`, `review`, `apply --out <DIR> [--dry-run]`, `status`. Plus the optional **enrich** subsystem (nested): `enrich scan|cluster|assign|merge|review|apply|status` — faces (InsightFace→HDBSCAN) + content tags (RAM++/CLIP) written into the *already-copied* library as portable XMP. (`assign` = centroid label-propagation of named people onto unassigned faces; `merge` = fold duplicate/misspelled person names into one.) Gated behind `pip install -e .[enrich]`; degrades gracefully when the model stack is absent. Design: `docs/plans/2026-06-13-enrich-design.md`.
 
 All state lives in `--workdir` (default `./photoflow_work`). Requires Python 3.11+, exiftool on PATH (hard requirement — scan exits without it). Pillow/ImageHash/pillow-heif are optional; without them, near-dupe flagging degrades gracefully to exact dedupe only. Pure-logic tests (dates, bktree, naming, hashing) run without exiftool; exiftool-dependent tests are marked `@pytest.mark.exiftool` and skip if it's absent. Enrich pure-logic tests (clustering, regions, page, thresholds) run in CI via numpy+scikit-learn; model-dependent tests are marked `@pytest.mark.enrich` and skip when the [enrich] stack is absent.
 
@@ -44,7 +44,7 @@ HANDOFF.md §2 is the full list — preserve these in any change. The most viola
 - **Infra** — `db.py`, `audit.py`, `exiftool.py`, `xmp.py`.
 - **`config.py`** — frozen `Config` dataclass with defaults + `photoflow.toml` loader (unknown keys are fatal).
 - **`models.py`** — role/status vocabularies.
-- **`enrich/`** — optional faces+tags subsystem, same command signature. Pure/CI-testable: `clustering.py` (HDBSCAN over embeddings), `regions.py` (MWG region geometry + keyword/subject argfile builders), `page.py` (faces.csv/tags.csv rows, payloads, the interactive `enrich_review.html`), `tagger.classify_tag`/vocab, `faces.face_crop`. Lazy heavy-import wrappers: `faces.py` (InsightFace), `tagger.py` (RAM++/CLIP), gated by `deps.py` (`HAVE_*`, device/provider selection — faces default to CPU). Commands: `enrich/{scan,cluster,review,apply,status}.py`. New DB tables `persons`/`faces`/`tags`/`enrich_state` (additive `IF NOT EXISTS`).
+- **`enrich/`** — optional faces+tags subsystem, same command signature. Pure/CI-testable: `clustering.py` (HDBSCAN over embeddings), `regions.py` (MWG region geometry + keyword/subject argfile builders), `page.py` (faces.csv/tags.csv rows, payloads, the interactive `enrich_review.html`), `tagger.classify_tag`/vocab, `faces.face_crop`. Lazy heavy-import wrappers: `faces.py` (InsightFace), `tagger.py` (RAM++/CLIP), gated by `deps.py` (`HAVE_*`, device/provider selection — faces default to CPU). Commands: `enrich/{scan,cluster,assign,merge,review,apply,status}.py`. New DB tables `persons`/`faces`/`tags`/`enrich_state` (additive `IF NOT EXISTS`).
 
 Key behaviors by area:
 

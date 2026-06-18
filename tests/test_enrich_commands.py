@@ -20,6 +20,7 @@ from photoflow.enrich import assign as eassign
 from photoflow.enrich import cluster as ecluster
 from photoflow.enrich import deps as edeps
 from photoflow.enrich import faces as efaces
+from photoflow.enrich import merge as emerge
 from photoflow.enrich import review as ereview
 from photoflow.enrich import scan as escan
 from photoflow.enrich import status as estatus
@@ -591,6 +592,59 @@ def test_assign_without_persons_is_graceful(tmp_path):
     _insert_face(conn, ids[0], which=0)
     conn.commit()
     _run(eassign.cmd_enrich_assign, conn, workdir, dry_run=False, min_sim=None)  # must not raise
+
+
+# ----------------------------------------------------- merge duplicate person names
+
+
+def test_merge_consolidates_duplicate_persons(tmp_path):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    cid = _make_person(conn, "Deirdre Hough", fid, which=0, n=2)
+    _make_person(conn, "Deidre Hough", fid, which=1, n=3)  # misspelled
+    _make_person(conn, "Deirdre hough", fid, which=2, n=1)  # wrong case
+    conn.commit()
+
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Deirdre Hough",
+        aliases=["Deidre Hough", "Deirdre hough"],
+    )
+
+    names = {r["name"] for r in conn.execute("SELECT name FROM persons")}
+    assert names == {"Deirdre Hough"}  # aliases removed
+    moved = conn.execute("SELECT COUNT(*) c FROM faces WHERE person_id=?", (cid,)).fetchone()["c"]
+    assert moved == 6  # every alias face repointed to the canonical person
+    assert conn.execute("SELECT COUNT(*) c FROM faces WHERE person_id IS NULL").fetchone()["c"] == 0
+
+
+def test_merge_creates_canonical_when_absent(tmp_path):
+    # only misspellings exist; the correct name is new -> it's created and absorbs them
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    _make_person(conn, "Yancey arrington", ids[0], which=0, n=2)
+    conn.commit()
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Yancey Arrington",
+        aliases=["Yancey arrington"],
+    )
+    assert {r["name"] for r in conn.execute("SELECT name FROM persons")} == {"Yancey Arrington"}
+    assert (
+        conn.execute("SELECT COUNT(*) c FROM faces WHERE person_id IS NOT NULL").fetchone()["c"]
+        == 2
+    )
+
+
+def test_merge_ignores_unknown_or_self_alias(tmp_path):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    _make_person(conn, "Mum", ids[0], which=0, n=2)
+    conn.commit()
+    _run(emerge.cmd_enrich_merge, conn, workdir, canonical="Mum", aliases=["Mum", "Nobody"])
+    assert {r["name"] for r in conn.execute("SELECT name FROM persons")} == {"Mum"}  # unchanged
 
 
 # ----------------------------------------------------- "not interested" faces stay gone
