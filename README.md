@@ -216,6 +216,31 @@ small (`0.1`–`0.3`) and verify it never merges two *distinct* named people. To
 who appear in only a few photos (Layer 2), lower `enrich_min_cluster_size` (e.g. `3`). Your
 already-named faces are ground truth — sweep these knobs and check no two named people merge.
 
+**Splitting a mega-cluster (the final straggler pass).** If `enrich cluster` lumps several
+people into one giant group, switch HDBSCAN from its default "biggest stable blob" selection to
+finest-grained:
+
+```toml
+# photoflow.toml
+enrich_cluster_selection_method = "leaf"   # split lumped clusters into per-person sub-clusters
+enrich_min_cluster_size = 3                 # (optional) also recover tiny groups
+```
+
+Because clustering only ever touches *unassigned* faces, this re-splits just the leftovers — your
+named people (now `person_id`s) are untouched. So the order that works:
+
+```
+uv run photoflow enrich apply     # bake names -> person_id (drains them from the pool)
+uv run photoflow enrich assign    # pull known people out of the mega-cluster first
+# set enrich_cluster_selection_method = "leaf" in photoflow.toml
+uv run photoflow enrich cluster   # re-split only the remaining unnamed faces
+uv run photoflow enrich review    # name the new smaller groups / "not interested" the junk
+```
+
+`leaf` trades bigger groups for more, smaller ones, so it over-splits if used as your everyday
+default — set it back to `eom` once the straggler pass is done. (Don't combine it with a high
+`epsilon`; they pull in opposite directions.)
+
 ### What gets written
 
 Per file, unioned with (never clobbering) the provenance keywords `apply` already wrote:

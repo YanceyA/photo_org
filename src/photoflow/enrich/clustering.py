@@ -25,6 +25,7 @@ def cluster_embeddings(
     min_cluster_size: int = 5,
     min_samples: int | None = None,
     cluster_selection_epsilon: float = 0.0,
+    cluster_selection_method: str = "eom",
 ) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
     """Cluster (N, D) embeddings into people.
 
@@ -49,7 +50,9 @@ def cluster_embeddings(
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
         metric="euclidean",  # cosine-equivalent on unit vectors, stays on the fast path
-        cluster_selection_method="eom",  # fewer/larger stable clusters (one-per-person)
+        # "eom" = fewer/larger stable clusters (one-per-person); "leaf" = finer sub-clusters,
+        # which splits a mega-cluster that lumped several people together.
+        cluster_selection_method=cluster_selection_method,
         cluster_selection_epsilon=cluster_selection_epsilon,
         store_centers="medoid",  # medoids are real observed faces, safe to display
         copy=True,  # don't mutate caller's array; also silences the 1.9->1.10 FutureWarning

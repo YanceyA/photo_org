@@ -174,10 +174,10 @@ def test_cluster_groups_unassigned_and_preserves_named(tmp_path):
 # --------------------------------------------------------------------------- review
 
 
-def test_cluster_passes_selection_epsilon_from_config(tmp_path, monkeypatch):
-    # Layer 1 knob: cluster_selection_epsilon merges adjacent burst-fragment clusters of one
-    # person. cluster_embeddings already accepts it; this guards that the command threads the
-    # configured value through (default 0.0 keeps today's behavior).
+def test_cluster_passes_selection_knobs_from_config(tmp_path, monkeypatch):
+    # Layer 1/2 knobs: cluster_selection_epsilon (merge burst fragments) + selection_method
+    # (eom vs leaf, to split mega-clusters). cluster_embeddings accepts both; this guards that
+    # the command threads the configured values through (defaults keep today's behavior).
     from dataclasses import replace
 
     conn, workdir, lib, ids = _seed(tmp_path, n=1)
@@ -196,13 +196,16 @@ def test_cluster_passes_selection_epsilon_from_config(tmp_path, monkeypatch):
         return real(embs, **kw)
 
     monkeypatch.setattr(ecluster, "cluster_embeddings", spy)
-    cfg = replace(Config(), enrich_cluster_selection_epsilon=0.35)
+    cfg = replace(
+        Config(), enrich_cluster_selection_epsilon=0.35, enrich_cluster_selection_method="leaf"
+    )
     run_id = new_run(conn, "enrich", {})
     logs = workdir / "logs"
     logs.mkdir(exist_ok=True)
     with open(logs / f"run_{run_id}.jsonl", "a", encoding="utf-8") as fh:
         ecluster.cmd_enrich_cluster(conn, workdir, run_id, fh, types.SimpleNamespace(), cfg)
     assert captured["cluster_selection_epsilon"] == 0.35
+    assert captured["cluster_selection_method"] == "leaf"
 
 
 def test_cluster_skips_malformed_embeddings(tmp_path):

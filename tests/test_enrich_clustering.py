@@ -39,6 +39,39 @@ def test_cluster_embeddings_finds_three_people():
         assert len(blob_labels) == 1 and -1 not in blob_labels
 
 
+def _two_clusters_one_with_submodes():
+    """Two far-apart people, where the second is really two near sub-modes (e.g. one identity the
+    clusterer lumped together). eom keeps that mega-cluster whole; leaf splits its sub-modes.
+    Deterministic via a fixed seed."""
+    rng = np.random.default_rng(0)
+
+    def blob(dirs, n, spread=0.02):
+        v = np.zeros((n, 512), dtype=np.float32)
+        for d, val in dirs:
+            v[:, d] = val
+            v[:, d] += rng.normal(0, spread, n).astype(np.float32)
+        v[:, 50:54] += rng.normal(0, spread, (n, 4)).astype(np.float32)  # realistic jitter
+        return v
+
+    person_x = blob([(0, 1.0)], 20)  # a distinct person, far from the rest
+    y_mode_a = blob([(5, 1.0), (6, 0.0)], 20)  # person Y, sub-mode A
+    y_mode_b = blob([(5, 1.0), (6, 0.12)], 20)  # person Y, sub-mode B (a small tilt away)
+    return np.vstack([person_x, y_mode_a, y_mode_b])
+
+
+def test_cluster_selection_method_leaf_splits_finer_than_eom():
+    # The knob for breaking up a mega-cluster: leaf selection carves a lumped blob into more,
+    # finer sub-clusters than the default eom (which prefers one big stable parent).
+    embs = _two_clusters_one_with_submodes()
+    eom_labels, _, _ = cluster_embeddings(embs, min_cluster_size=8, cluster_selection_method="eom")
+    leaf_labels, _, _ = cluster_embeddings(
+        embs, min_cluster_size=8, cluster_selection_method="leaf"
+    )
+    n_eom = len({int(lbl) for lbl in eom_labels if lbl != -1})
+    n_leaf = len({int(lbl) for lbl in leaf_labels if lbl != -1})
+    assert n_leaf > n_eom  # leaf pulls out the stragglers eom buried in the parent
+
+
 def test_cluster_probabilities_in_unit_range():
     rng = np.random.default_rng(3)
     embs, _ = _blobs(rng)

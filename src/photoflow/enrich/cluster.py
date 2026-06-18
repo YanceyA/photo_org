@@ -55,6 +55,7 @@ def cmd_enrich_cluster(conn, workdir, run_id, log_fh, args, cfg):
         min_cluster_size=cfg.enrich_min_cluster_size,
         min_samples=cfg.enrich_min_samples or None,
         cluster_selection_epsilon=cfg.enrich_cluster_selection_epsilon,
+        cluster_selection_method=cfg.enrich_cluster_selection_method,
     )
     for (face_id, _v), label, prob in zip(vecs, labels, probs):  # noqa: B905 (equal lengths)
         conn.execute(

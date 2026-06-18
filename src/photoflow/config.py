@@ -50,6 +50,11 @@ class Config:
     # fragments of one person into a single cluster (Layer 1). Default 0 = today's behavior;
     # raise gradually (e.g. 0.1-0.3) and check it never merges two distinct named people.
     enrich_cluster_selection_epsilon: float = 0.0
+    # HDBSCAN cluster selection: "eom" (default) prefers fewer/larger stable clusters;
+    # "leaf" picks the finest sub-clusters, which breaks up a mega-cluster that lumped several
+    # people together (at the cost of more, smaller groups to name). Usually paired with a
+    # lower enrich_min_cluster_size for a final straggler-splitting pass.
+    enrich_cluster_selection_method: str = "eom"
     enrich_cluster_prob_floor: float = 0.5  # member prob below this = edge case for review
     enrich_assign_threshold: float = 0.5  # cosine sim to auto-suggest a new face to a named person
     enrich_auto_assign_threshold: float = 0.6  # higher bar for `enrich assign` to COMMIT a label
