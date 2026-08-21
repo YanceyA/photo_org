@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS enrich_state (   -- incremental skip, like scan's siz
     faces_done INTEGER DEFAULT 0,
     tags_done INTEGER DEFAULT 0,
     applied INTEGER DEFAULT 0,
+    applied_sig TEXT,          -- hash of what apply last wrote; equal => skip the rewrite
     ts TEXT
 );
 """
@@ -114,6 +115,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(faces)")}
     if "ignored" not in cols:
         conn.execute("ALTER TABLE faces ADD COLUMN ignored INTEGER DEFAULT 0")
+        conn.commit()
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(enrich_state)")}
+    if "applied_sig" not in cols:
+        conn.execute("ALTER TABLE enrich_state ADD COLUMN applied_sig TEXT")
         conn.commit()
 
 

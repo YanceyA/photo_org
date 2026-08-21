@@ -77,6 +77,7 @@ def main():
     esub.add_parser("review", help="export enrich_review.html + faces.csv + tags.csv")
     ea = esub.add_parser("apply", help="write confirmed people + tags into the library files")
     ea.add_argument("--dry-run", action="store_true")
+    ea.add_argument("--all", action="store_true", help="rewrite every file, even unchanged ones")
     esub.add_parser("status", help="enrich summary (faces, clusters, tags)")
 
     args = ap.parse_args()

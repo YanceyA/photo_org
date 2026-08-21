@@ -25,6 +25,7 @@ from photoflow.enrich import review as ereview
 from photoflow.enrich import scan as escan
 from photoflow.enrich import status as estatus
 from photoflow.enrich import tagger as etagger
+from photoflow.exiftool import ExiftoolResult
 
 
 def _seed(tmp_path: Path, n=3):
@@ -274,6 +275,16 @@ def _write_csv(path, columns, rows):
         w.writerows(rows)
 
 
+def _fake_exiftool(captured):
+    """Stand in for exiftool_apply_argfile: collect every batch's lines, report success."""
+
+    def run(lines):
+        captured.setdefault("lines", []).extend(lines)
+        return ExiftoolResult(0, "", "")
+
+    return run
+
+
 def test_apply_builds_region_and_keyword_args(tmp_path, monkeypatch):
     conn, workdir, lib, ids = _seed(tmp_path, n=1)
     fid = ids[0]
@@ -330,10 +341,9 @@ def test_apply_builds_region_and_keyword_args(tmp_path, monkeypatch):
     )
 
     captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
     monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
-    monkeypatch.setattr(
-        eapply, "exiftool_apply_argfile", lambda lines: captured.setdefault("lines", lines)
-    )
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
 
     _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False)
 
@@ -392,10 +402,9 @@ def test_apply_writes_sidecar_target_for_raw(tmp_path, monkeypatch):
     )
 
     captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
     monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
-    monkeypatch.setattr(
-        eapply, "exiftool_apply_argfile", lambda lines: captured.setdefault("lines", lines)
-    )
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
     _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False)
 
     lines = captured["lines"]
@@ -441,10 +450,9 @@ def test_apply_respects_blacklist_and_rejects(tmp_path, monkeypatch):
         ],
     )
     captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
     monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
-    monkeypatch.setattr(
-        eapply, "exiftool_apply_argfile", lambda lines: captured.setdefault("lines", lines)
-    )
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
     _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False)
     # blacklisted tag never written; nothing to write for this file at all
     assert "-XMP-dc:Subject=person" not in captured.get("lines", [])
@@ -509,6 +517,147 @@ def test_apply_real_exiftool_roundtrip(tmp_path):
     names = rec.get("RegionName")
     names = [names] if isinstance(names, str) else (names or [])
     assert "Mum" in names
+
+
+def _one_face_file(tmp_path, person="Mum", n=1):
+    """Seed n library files, one face each, plus a faces.csv naming them all `person`."""
+    conn, workdir, lib, ids = _seed(tmp_path, n=n)
+    rows = []
+    for fid in ids:
+        _insert_face(conn, fid, which=0)
+        face_id = conn.execute("SELECT MAX(id) m FROM faces").fetchone()["m"]
+        conn.execute("UPDATE faces SET bbox=? WHERE id=?", ("[20,20,80,100]", face_id))
+        rows.append(_face_row(1, face_id, fid, person=person, decision="keep"))
+    conn.commit()
+    _write_csv(workdir / "faces.csv", FACE_COLS, rows)
+    _write_csv(
+        workdir / "tags.csv", ["file_id", "tag", "source", "score", "suggestion", "decision"], []
+    )
+    return conn, workdir, lib, ids
+
+
+def test_apply_is_incremental_on_the_second_run(tmp_path, monkeypatch, capsys):
+    # H10: apply rewrote every enriched file on every run (9 runs = 9 full-library rewrites,
+    # 9 mtime bumps). A per-file signature of what we'd write makes the second run a no-op.
+    conn, workdir, lib, ids = _one_face_file(tmp_path)
+    captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+    assert captured["lines"], "first run must write"
+    sig1 = conn.execute("SELECT applied_sig FROM enrich_state").fetchone()["applied_sig"]
+    assert sig1
+
+    captured.clear()
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+    out = capsys.readouterr().out
+    assert captured.get("lines", []) == []  # nothing rewritten
+    assert "written 0" in out and "unchanged 1" in out
+    assert conn.execute("SELECT applied_sig FROM enrich_state").fetchone()["applied_sig"] == sig1
+
+    # --all forces the rewrite back on
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=True)
+    assert captured["lines"]
+
+
+def test_apply_rewrites_only_the_file_whose_people_changed(tmp_path, monkeypatch):
+    conn, workdir, lib, ids = _one_face_file(tmp_path, n=2)
+    captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    # rename the person on ONE file only, the way the review page delivers it: a new name in
+    # faces.csv for that one face. (A bare UPDATE of faces.person_id would be undone by step 1,
+    # which re-applies faces.csv over the DB on every run.)
+    target = conn.execute("SELECT id FROM faces WHERE file_id=?", (ids[0],)).fetchone()["id"]
+    rows = list(csv.DictReader((workdir / "faces.csv").open(encoding="utf-8")))
+    for r in rows:
+        if int(r["face_id"]) == target:
+            r["person"] = "Mother"
+    _write_csv(workdir / "faces.csv", FACE_COLS, rows)
+
+    captured.clear()
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+    dests = {r["dest_path"] for r in conn.execute("SELECT id, dest_path FROM files")}
+    written = [ln for ln in captured["lines"] if ln in dests]
+    changed = conn.execute("SELECT dest_path FROM files WHERE id=?", (ids[0],)).fetchone()
+    assert written == [changed["dest_path"]]  # only the changed file was rewritten
+
+
+def test_apply_dry_run_mutates_nothing(tmp_path, monkeypatch):
+    # R2: the dry run used to durably commit the step-1 person upsert + faces.person_id,
+    # hiding those clusters from the next `enrich review`.
+    conn, workdir, lib, ids = _one_face_file(tmp_path)
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool({}))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=True, all=False)
+
+    assert conn.execute("SELECT COUNT(*) c FROM persons").fetchone()["c"] == 0
+    assert (
+        conn.execute("SELECT COUNT(*) c FROM faces WHERE person_id IS NOT NULL").fetchone()["c"]
+        == 0
+    )
+    assert conn.execute("SELECT COUNT(*) c FROM enrich_state").fetchone()["c"] == 0
+
+
+def test_apply_skips_files_whose_keyword_read_failed(tmp_path, monkeypatch, capsys):
+    # R1: one corrupt XMP makes read_keywords return {} for its whole 200-file batch. Falling
+    # back to existing=set() and clearing dc:Subject would wipe every pre-existing keyword.
+    conn, workdir, lib, ids = _one_face_file(tmp_path)
+    captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    out = capsys.readouterr().out
+    assert captured.get("lines", []) == []  # nothing written rather than everything clobbered
+    assert "skipped-unreadable 1" in out
+    assert conn.execute("SELECT COUNT(*) c FROM enrich_state").fetchone()["c"] == 0
+
+
+def test_apply_failed_batch_keeps_the_old_signature(tmp_path, monkeypatch, capsys):
+    # E2: a read-only/locked file made exiftool exit non-zero and apply reported success.
+    conn, workdir, lib, ids = _one_face_file(tmp_path)
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(
+        eapply,
+        "exiftool_apply_argfile",
+        lambda lines: ExiftoolResult(
+            returncode=1, stderr="Error: img0.jpg is not writable", stdout=""
+        ),
+    )
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    out = capsys.readouterr().out
+    assert "failed 1" in out and "not writable" in out
+    row = conn.execute("SELECT applied_sig FROM enrich_state").fetchone()
+    assert row is None or row["applied_sig"] is None  # never marked applied
+
+
+@pytest.mark.exiftool
+def test_apply_preserves_library_mtime(tmp_path):
+    # H9: -overwrite_original without -P resets mtime to "now" on every apply, and HANDOFF
+    # §2.1 promises the library mtime is the source mtime.
+    import os
+
+    conn, workdir, lib, ids = _one_face_file(tmp_path)
+    dest = conn.execute("SELECT dest_path FROM files").fetchone()["dest_path"]
+    os.utime(dest, (1_000_000_000, 1_000_000_000))
+    before = os.stat(dest).st_mtime
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    assert os.stat(dest).st_mtime == pytest.approx(before, abs=2)
 
 
 # ----------------------------------------------------- assign (centroid label propagation)
@@ -677,8 +826,10 @@ def test_apply_marks_fully_dismissed_cluster_ignored(tmp_path, monkeypatch):
     _write_csv(
         workdir / "tags.csv", ["file_id", "tag", "source", "score", "suggestion", "decision"], []
     )
+    captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
     monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
-    monkeypatch.setattr(eapply, "exiftool_apply_argfile", lambda lines: None)
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
     _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False)
 
     for f in c1:
