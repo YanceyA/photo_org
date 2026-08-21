@@ -64,6 +64,12 @@ def test_copy_error_is_isolated_to_one_row(photo_fixture: Path, tmp_path: Path, 
     pf(work, "scan", str(photo_fixture))
     pf(work, "plan")
     victim = str(photo_fixture / "Old Laptop" / "Holiday 2015" / "beach.jpg")
+    vrow = q(work, "SELECT role FROM files WHERE source_path=?", victim)[0]
+    assert vrow["role"] == "keep", (
+        "this test needs beach.jpg to be the keeper of its exact-dupe group with "
+        "'beach copy.jpg' (equal mtimes, tie broken by an un-ORDERed SELECT in plan). "
+        "If the keeper flipped, the injected copy error lands on a skipped dupe instead."
+    )
     real_copy2 = shutil.copy2
 
     def fake_copy2(src, dst, *a, **kw):

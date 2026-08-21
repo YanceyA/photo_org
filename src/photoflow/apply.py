@@ -15,14 +15,15 @@ from photoflow.xmp import EMBED_EXT, embed_args, xmp_sidecar
 
 def _copy_atomic(src: str, dest: Path) -> None:
     """Copy via <dest>.part + os.replace so a crash / full disk can never leave a
-    truncated file sitting at dest (os.replace is atomic within one filesystem)."""
+    truncated file sitting at dest (os.replace is atomic within one filesystem).
+    The .part is removed on ANY failure (incl. KeyboardInterrupt); after a successful
+    os.replace it no longer exists, so the finally is a no-op."""
     tmp = dest.with_name(dest.name + ".part")
     try:
         shutil.copy2(src, tmp)
         os.replace(tmp, dest)
-    except OSError:
+    finally:
         tmp.unlink(missing_ok=True)
-        raise
 
 
 def _flush_xmp(conn, log_fh, run_id, xmp_args: list[str]) -> None:
