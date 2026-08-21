@@ -107,3 +107,64 @@ def test_next_hints_use_the_installed_command_name():
     pkg = Path(__import__("photoflow").__file__).parent
     for name in ("scan.py", "planner.py"):
         assert "python photoflow.py" not in (pkg / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.exiftool
+def test_rescan_rehashes_rows_left_without_a_content_hash(tmp_path: Path):
+    """H8: an interrupted scan leaves content_hash NULL; size+mtime alone would skip it forever."""
+    src = tmp_path / "src"
+    src.mkdir()
+    _gradient(640, 480, seed=47).save(src / "photo.jpg", "JPEG", quality=92)
+    work = tmp_path / "work"
+    pf(work, "scan", str(src))
+    conn = open_db(work)
+    conn.execute("UPDATE files SET content_hash=NULL, meta_read=0, exif_date=NULL")
+    conn.commit()
+    conn.close()
+
+    pf(work, "scan", str(src))  # same tree, unchanged size+mtime
+
+    row = q(work, "SELECT content_hash, meta_read FROM files")[0]
+    assert row["content_hash"], "NULL-hash row was skipped by the size+mtime rule"
+    assert row["meta_read"] == 1
+
+
+@pytest.mark.exiftool
+def test_read_metadata_pending_is_manifest_driven_and_marks_rows_done(tmp_path: Path):
+    from conftest import _set_exif
+
+    from photoflow.config import Config
+    from photoflow.scan import read_metadata_pending
+
+    img = tmp_path / "shot.jpg"
+    _gradient(320, 240, seed=48).save(img, "JPEG", quality=92)
+    _set_exif(img, DateTimeOriginal="2015:07:14 10:30:00", Model="Canon EOS 70D")
+
+    conn = open_db(tmp_path / "work")
+    conn.execute(
+        "INSERT INTO files(source_path, kind, status, content_hash, meta_read) VALUES (?,?,?,?,0)",
+        (str(img), "image", "scanned", "deadbeef" * 8),
+    )
+    # not a candidate: no content_hash yet (interrupted hashing pass)
+    conn.execute(
+        "INSERT INTO files(source_path, kind, status, meta_read) VALUES (?,?,?,0)",
+        (str(tmp_path / "nohash.jpg"), "image", "scanned"),
+    )
+    conn.commit()
+
+    assert read_metadata_pending(conn, Config()) == 1
+    row = conn.execute("SELECT * FROM files WHERE source_path=?", (str(img),)).fetchone()
+    assert row["exif_date"] == "2015:07:14 10:30:00"
+    assert row["camera"] == "Canon EOS 70D"
+    assert row["meta_read"] == 1
+
+    # done rows are never re-read
+    conn.execute("UPDATE files SET exif_date='TOUCHED' WHERE source_path=?", (str(img),))
+    conn.commit()
+    assert read_metadata_pending(conn, Config()) == 0
+    assert (
+        conn.execute("SELECT exif_date FROM files WHERE source_path=?", (str(img),)).fetchone()[
+            "exif_date"
+        ]
+        == "TOUCHED"
+    )

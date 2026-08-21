@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS files (
     dupe_of INTEGER,
     role TEXT,
     status TEXT DEFAULT 'scanned',
+    meta_read INTEGER DEFAULT 0,
     dest_path TEXT,
     error TEXT
 );
@@ -114,6 +115,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(faces)")}
     if "ignored" not in cols:
         conn.execute("ALTER TABLE faces ADD COLUMN ignored INTEGER DEFAULT 0")
+        conn.commit()
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
+    if "meta_read" not in cols:
+        # 0 = "exiftool has not read this row yet". Pre-existing rows were read by the old
+        # inline pass, but re-reading them is harmless (and scan --refresh-meta wants exactly
+        # this flag), so defaulting to 0 is the safe direction.
+        conn.execute("ALTER TABLE files ADD COLUMN meta_read INTEGER DEFAULT 0")
         conn.commit()
 
 

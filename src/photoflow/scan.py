@@ -65,21 +65,22 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
                     continue
                 sp = str(p)
                 existing = conn.execute(
-                    "SELECT size, mtime FROM files WHERE source_path=?", (sp,)
+                    "SELECT size, mtime, content_hash FROM files WHERE source_path=?", (sp,)
                 ).fetchone()
                 if (
                     existing
+                    and existing["content_hash"] is not None
                     and existing["size"] == st.st_size
                     and abs(existing["mtime"] - st.st_mtime) < 1
                 ):
-                    continue  # already scanned, unchanged
+                    continue  # already scanned AND fingerprinted, unchanged
                 conn.execute(
                     """INSERT INTO files(source_path, source_root, rel_path, size,
                                          mtime, ext, kind)
                        VALUES (?,?,?,?,?,?,?)
                        ON CONFLICT(source_path) DO UPDATE SET
                          size=excluded.size, mtime=excluded.mtime, status='scanned',
-                         content_hash=NULL, phash=NULL""",
+                         content_hash=NULL, phash=NULL, meta_read=0""",
                     (
                         sp,
                         str(root),
@@ -112,23 +113,7 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
     conn.commit()
 
     # exif
-    print("reading metadata (exiftool)...")
-    meta = exiftool_json(new_paths, cfg.exiftool_batch)
-    for sp, rec in meta.items():
-        raw_date = (
-            rec.get("DateTimeOriginal") or rec.get("CreateDate") or rec.get("MediaCreateDate")
-        )
-        conn.execute(
-            "UPDATE files SET exif_date=?, camera=?, width=?, height=? WHERE source_path=?",
-            (
-                str(raw_date) if raw_date else None,
-                rec.get("Model"),
-                rec.get("ImageWidth"),
-                rec.get("ImageHeight"),
-                sp,
-            ),
-        )
-    conn.commit()
+    read_metadata_pending(conn, cfg)
 
     # perceptual hashes (images only)
     if HAVE_IMAGEHASH:
@@ -139,6 +124,46 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
         log_action(conn, log_fh, run_id, row["id"], "scanned", sp)
     conn.commit()
     print("scan complete. Next: photoflow plan")
+
+
+def read_metadata_pending(conn, cfg) -> int:
+    """Read exiftool metadata for every manifest row still flagged meta_read=0.
+
+    Manifest-driven for the same reasons as phash_pending_images: an IN(<paths>) clause
+    overflows SQLite's 32766-variable cap on large imports, and an interrupted scan resumes
+    here instead of losing the pass. meta_read is set to 1 per batch even when exiftool
+    returned nothing for a path - otherwise a tag-less file is retried on every future run.
+    """
+    rows = conn.execute(
+        "SELECT id, source_path, kind FROM files "
+        "WHERE status='scanned' AND content_hash IS NOT NULL AND meta_read=0"
+    ).fetchall()
+    if not rows:
+        return 0
+    print(f"reading metadata (exiftool) for {len(rows)} files...")
+    done = 0
+    for i in range(0, len(rows), cfg.exiftool_batch):
+        batch = rows[i : i + cfg.exiftool_batch]
+        meta = exiftool_json([r["source_path"] for r in batch], cfg.exiftool_batch)
+        for r in batch:
+            rec = meta.get(r["source_path"], {})
+            raw_date = (
+                rec.get("DateTimeOriginal") or rec.get("CreateDate") or rec.get("MediaCreateDate")
+            )
+            conn.execute(
+                "UPDATE files SET exif_date=?, camera=?, width=?, height=?, meta_read=1 WHERE id=?",
+                (
+                    str(raw_date) if raw_date else None,
+                    rec.get("Model"),
+                    rec.get("ImageWidth"),
+                    rec.get("ImageHeight"),
+                    r["id"],
+                ),
+            )
+        conn.commit()
+        done += len(batch)
+        print(f"  metadata {done}/{len(rows)}")
+    return done
 
 
 def phash_pending_images(conn):
