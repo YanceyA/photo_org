@@ -24,8 +24,13 @@ def xmp_sidecar(dest: Path, description: str, keywords: list[str]):
 
 
 def embed_args(dest: str, description: str, keywords: list[str]) -> list[str]:
-    """exiftool argfile lines to embed Dublin Core XMP into one file."""
-    lines = ["-overwrite_original", f"-XMP-dc:Description={description}"]
+    """exiftool argfile lines to embed Dublin Core XMP into one file.
+
+    -P preserves FileModifyDate: without it -overwrite_original resets the library
+    file's mtime to "now", breaking HANDOFF §2.1 and re-triggering mtime-based
+    re-indexing (Immich) / re-upload (backup) of the whole library.
+    """
+    lines = ["-P", "-overwrite_original", f"-XMP-dc:Description={description}"]
     lines += [f"-XMP-dc:Subject={k}" for k in keywords]
     lines += [dest, "-execute"]
     return lines

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import shutil
 from pathlib import Path
 
@@ -10,6 +11,36 @@ from photoflow.audit import log_action
 from photoflow.exiftool import exiftool_apply_argfile, merge_metadata
 from photoflow.naming import dest_for
 from photoflow.xmp import EMBED_EXT, embed_args, xmp_sidecar
+
+
+def _copy_atomic(src: str, dest: Path) -> None:
+    """Copy via <dest>.part + os.replace so a crash / full disk can never leave a
+    truncated file sitting at dest (os.replace is atomic within one filesystem)."""
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dest)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _flush_xmp(conn, log_fh, run_id, xmp_args: list[str]) -> None:
+    """Embed the queued provenance blocks and report (never raise) exiftool failures.
+
+    Called before each commit, so a crash can only ever leave files embedded but not
+    yet marked copied - which the next run repairs. The reverse order would mark rows
+    copied with no provenance and never revisit them.
+    """
+    if not xmp_args:
+        return
+    print(f"  embedding XMP provenance for {xmp_args.count('-execute')} files (exiftool)...")
+    res = exiftool_apply_argfile(xmp_args)
+    if res.returncode != 0:
+        head = " / ".join(res.stderr.strip().splitlines()[:3])
+        print(f"exiftool reported errors: {head}")
+        log_action(conn, log_fh, run_id, 0, "xmp_embed_errors", f"rc={res.returncode} {head}")
+    xmp_args.clear()
 
 
 def cmd_apply(conn, workdir, run_id, log_fh, args, cfg):
@@ -25,7 +56,7 @@ def cmd_apply(conn, workdir, run_id, log_fh, args, cfg):
                     decisions[int(row["file_id"])] = (d, int(mf) if mf else None)
 
     rows = conn.execute("SELECT * FROM files WHERE status IN ('planned','review')").fetchall()
-    copied = skipped = held = 0
+    copied = skipped = held = errors = 0
     xmp_args: list[str] = []
     merge_jobs: list[tuple[int, int]] = []
 
@@ -52,12 +83,29 @@ def cmd_apply(conn, workdir, run_id, log_fh, args, cfg):
                 merge_jobs.append((r["id"], d[1]))
 
         dest = dest_for(r, out_root, cfg.slug_max)
-        dest.parent.mkdir(parents=True, exist_ok=True)
         if args.dry_run:
             print(f"DRY  {r['source_path']}  ->  {dest}")
             continue
-        if not dest.exists():
-            shutil.copy2(r["source_path"], dest)
+
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            src_size = os.path.getsize(r["source_path"])
+            if not dest.exists():
+                _copy_atomic(r["source_path"], dest)
+            elif dest.stat().st_size < src_size:
+                # Only reachable when a previous run died between the copy and its
+                # commit. A dest SMALLER than the source is a truncated copy from a
+                # pre-atomic-copy version -> re-copy. A dest that is LARGER is a file
+                # that was already XMP-embedded (embedding grows it) before the crash ->
+                # trust it; the provenance lines are re-emitted below anyway, so it
+                # converges without a wasted copy. (Coordinator note: `<` not `!=`.)
+                _copy_atomic(r["source_path"], dest)
+                log_action(conn, log_fh, run_id, r["id"], "recopied_size_mismatch", str(dest))
+        except OSError as e:
+            conn.execute("UPDATE files SET status='error', error=? WHERE id=?", (str(e), r["id"]))
+            log_action(conn, log_fh, run_id, r["id"], "copy_error", str(e))
+            errors += 1
+            continue
 
         # provenance metadata: original folder names + dupes' folders as keywords
         rels = [r["rel_path"] or ""]
@@ -84,13 +132,12 @@ def cmd_apply(conn, workdir, run_id, log_fh, args, cfg):
         )
         copied += 1
         if copied % 500 == 0:
+            _flush_xmp(conn, log_fh, run_id, xmp_args)
             conn.commit()
             print(f"  copied {copied}...")
+    if not args.dry_run:
+        _flush_xmp(conn, log_fh, run_id, xmp_args)
     conn.commit()
-
-    if not args.dry_run and xmp_args:
-        print("embedding XMP provenance (exiftool)...")
-        exiftool_apply_argfile(xmp_args)
 
     # metadata merges chosen during review: fill missing tags from the twin
     for keeper_id, donor_id in merge_jobs:
@@ -100,6 +147,11 @@ def cmd_apply(conn, workdir, run_id, log_fh, args, cfg):
             merge_metadata(d["source_path"], k["dest_path"])
             log_action(conn, log_fh, run_id, keeper_id, "metadata_merged", f"from file {donor_id}")
     conn.commit()
-    print(f"apply complete: {copied} copied, {skipped} skipped, {held} still held for review.")
+    print(
+        f"apply complete: {copied} copied, {skipped} skipped, {held} still held for review, "
+        f"{errors} errors."
+    )
+    if errors:
+        print("Errored files keep status='error' (durable) - fix the source and clear the row.")
     if held:
         print("Held files: fill in decisions.csv and run apply again.")
