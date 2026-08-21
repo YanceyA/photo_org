@@ -171,6 +171,6 @@ def cmd_plan(conn, workdir, run_id, log_fh, args, cfg):
         f"{review_groups} near-dupe groups need review."
     )
     if review_groups:
-        print("Next: python photoflow.py review")
+        print("Next: photoflow review")
     else:
-        print("Next: python photoflow.py apply --out <DIR>")
+        print("Next: photoflow apply --out <DIR>")

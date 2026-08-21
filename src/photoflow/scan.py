@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -23,41 +24,77 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
         print("NOTE: pillow-heif not installed - HEIC files get exact dedupe only.")
 
     new_paths = []
+    pruned = unreadable = too_small = 0
+    excluded = {d.lower() for d in cfg.exclude_dirs}
+
+    def _walk_error(err: OSError) -> None:
+        nonlocal unreadable
+        unreadable += 1
+        print(f"  unreadable: {err}")
+
     for root in args.sources:
         root = Path(root).expanduser().resolve()
         if not root.exists():
             print(f"skipping missing source: {root}")
             continue
         print(f"scanning {root} ...")
-        for p in sorted(root.rglob("*")):
-            if not p.is_file() or p.name.startswith("."):
-                continue
-            ext = p.suffix.lower()
-            kind = classify(ext, cfg)
-            if kind == "other":
-                continue
-            sp = str(p)
-            existing = conn.execute(
-                "SELECT size, mtime FROM files WHERE source_path=?", (sp,)
-            ).fetchone()
-            st = p.stat()
-            if (
-                existing
-                and existing["size"] == st.st_size
-                and abs(existing["mtime"] - st.st_mtime) < 1
-            ):
-                continue  # already scanned, unchanged
-            conn.execute(
-                """INSERT INTO files(source_path, source_root, rel_path, size,
-                                     mtime, ext, kind)
-                   VALUES (?,?,?,?,?,?,?)
-                   ON CONFLICT(source_path) DO UPDATE SET
-                     size=excluded.size, mtime=excluded.mtime, status='scanned',
-                     content_hash=NULL, phash=NULL""",
-                (sp, str(root), str(p.relative_to(root)), st.st_size, st.st_mtime, ext, kind),
-            )
-            new_paths.append(sp)
+        for dirpath, dirnames, filenames in os.walk(root, onerror=_walk_error):
+            keep = []
+            for d in sorted(dirnames):
+                if d.lower() in excluded:
+                    pruned += 1
+                    continue
+                keep.append(d)
+            dirnames[:] = keep  # in-place: this is what prunes the walk
+            for fn in sorted(filenames):
+                if fn.startswith("."):
+                    continue
+                ext = Path(fn).suffix.lower()
+                kind = classify(ext, cfg)
+                if kind == "other":
+                    continue
+                p = Path(dirpath) / fn
+                try:
+                    st = p.stat()
+                except OSError as e:
+                    unreadable += 1
+                    print(f"  unreadable: {e}")
+                    continue
+                if st.st_size < cfg.min_size_bytes:
+                    too_small += 1
+                    continue
+                sp = str(p)
+                existing = conn.execute(
+                    "SELECT size, mtime FROM files WHERE source_path=?", (sp,)
+                ).fetchone()
+                if (
+                    existing
+                    and existing["size"] == st.st_size
+                    and abs(existing["mtime"] - st.st_mtime) < 1
+                ):
+                    continue  # already scanned, unchanged
+                conn.execute(
+                    """INSERT INTO files(source_path, source_root, rel_path, size,
+                                         mtime, ext, kind)
+                       VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(source_path) DO UPDATE SET
+                         size=excluded.size, mtime=excluded.mtime, status='scanned',
+                         content_hash=NULL, phash=NULL""",
+                    (
+                        sp,
+                        str(root),
+                        str(p.relative_to(root)),
+                        st.st_size,
+                        st.st_mtime,
+                        ext,
+                        kind,
+                    ),
+                )
+                new_paths.append(sp)
     conn.commit()
+    print(
+        f"walk: pruned {pruned} dirs, skipped {unreadable} unreadable, {too_small} below min size"
+    )
     print(f"{len(new_paths)} new/changed files to fingerprint")
 
     # content hashes
@@ -101,7 +138,7 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
         row = conn.execute("SELECT id FROM files WHERE source_path=?", (sp,)).fetchone()
         log_action(conn, log_fh, run_id, row["id"], "scanned", sp)
     conn.commit()
-    print("scan complete. Next: python photoflow.py plan")
+    print("scan complete. Next: photoflow plan")
 
 
 def phash_pending_images(conn):
