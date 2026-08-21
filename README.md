@@ -27,9 +27,11 @@ content, preserves folder/filename context as XMP metadata, and logs every actio
 uv run photoflow scan  "D:/OldLaptopDump" "E:/PhoneBackup"
 uv run photoflow plan
 uv run photoflow review               # only if plan queued near-dupe groups
-# ... open photoflow_work/review.html in Chrome/Edge, click Keep on the photos
-#     to keep, then "Save decisions.csv" (other browsers download the CSV;
-#     hand-editing photoflow_work/decisions.csv still works) ...
+# ... open photoflow_work/review.html in Chrome/Edge: Enter keeps the suggested
+#     photo of the highlighted group and moves on (1-9 keep that card, arrows
+#     move, h hides decided, s saves) or click Keep on the photos to keep; then
+#     "Save decisions.csv" (other browsers download the CSV; hand-editing
+#     photoflow_work/decisions.csv still works) ...
 uv run photoflow apply --out "D:/Photos-Organized" [--dry-run]
 uv run photoflow status
 ```
