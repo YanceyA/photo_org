@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 
 EXIF_TAGS = [
+    # QuickTime Keys:CreationDate - tz-aware, written by iPhones, preferred for video
+    "-CreationDate",
     "-DateTimeOriginal",
     "-CreateDate",
     "-MediaCreateDate",
@@ -24,13 +26,25 @@ def exiftool_available() -> bool:
     return shutil.which("exiftool") is not None
 
 
-def exiftool_json(paths: list[str], batch_size: int = 200) -> dict[str, dict]:
-    """Run exiftool on a batch of paths, return {path: tags}."""
+def exiftool_json(paths: list[str], batch_size: int = 200, *, fast: bool = True) -> dict[str, dict]:
+    """Run exiftool on a batch of paths, return {path: tags}.
+
+    fast=True adds -fast2, which stops reading before trailing metadata - a big speedup for
+    JPEG/RAW. It MUST be False for QuickTime (MP4/MOV): those keep their moov atom at the END
+    of the file, so -fast2 returns nothing at all (verified: exiftool 13.59 returns {} for a
+    trailing-moov MP4 with -fast2 and CreateDate without it).
+
+    -api QuickTimeUTC=1 is always on: QuickTime dates are UTC by spec, and without this the
+    library files a midnight clip under the wrong day (12-13 h off in NZ).
+    """
     out: dict[str, dict] = {}
     for i in range(0, len(paths), batch_size):
         batch = paths[i : i + batch_size]
         with tempfile.NamedTemporaryFile("w", suffix=".args", delete=False, encoding="utf-8") as af:
-            af.write("-j\n-n\n-fast2\n-charset\nfilename=utf8\n")
+            af.write("-j\n-n\n")
+            if fast:
+                af.write("-fast2\n")
+            af.write("-api\nQuickTimeUTC=1\n-charset\nfilename=utf8\n")
             for t in EXIF_TAGS:
                 af.write(t + "\n")
             for p in batch:

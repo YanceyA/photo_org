@@ -147,7 +147,13 @@ def read_metadata_pending(conn, cfg) -> int:
     done = 0
     for i in range(0, len(rows), cfg.exiftool_batch):
         batch = rows[i : i + cfg.exiftool_batch]
-        meta = exiftool_json([r["source_path"] for r in batch], cfg.exiftool_batch)
+        # -fast2 is a large win for JPEG/RAW but returns NOTHING for trailing-moov QuickTime,
+        # so video is read in a second, slower call.
+        video = [r["source_path"] for r in batch if r["kind"] == "video"]
+        other = [r["source_path"] for r in batch if r["kind"] != "video"]
+        meta_other = exiftool_json(other, cfg.exiftool_batch, fast=True)
+        meta_video = exiftool_json(video, cfg.exiftool_batch, fast=False)
+        meta = {**meta_other, **meta_video}
         for r in batch:
             rec = meta.get(r["source_path"])
             if rec is None:
@@ -156,11 +162,18 @@ def read_metadata_pending(conn, cfg) -> int:
                 # whole came back non-empty this path is individually unreadable -> mark it
                 # done so it isn't retried forever; if the batch is entirely empty, leave
                 # meta_read=0 so a transient exiftool failure is retried next run.
-                if meta:
+                # The non-empty test is per exiftool invocation, not on the merged dict: these
+                # sub-batches are <= cfg.exiftool_batch, which is exiftool_json's own batch
+                # size, so each sub-call is exactly one invocation and a failed video call
+                # next to a successful image call must not mark the video rows done.
+                if bool(meta_video) if r["kind"] == "video" else bool(meta_other):
                     conn.execute("UPDATE files SET meta_read=1 WHERE id=?", (r["id"],))
                 continue
             raw_date = (
-                rec.get("DateTimeOriginal") or rec.get("CreateDate") or rec.get("MediaCreateDate")
+                rec.get("CreationDate")
+                or rec.get("DateTimeOriginal")
+                or rec.get("CreateDate")
+                or rec.get("MediaCreateDate")
             )
             conn.execute(
                 "UPDATE files SET exif_date=?, camera=?, width=?, height=?, meta_read=1 WHERE id=?",

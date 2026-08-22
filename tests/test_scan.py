@@ -193,13 +193,15 @@ def test_read_metadata_pending_does_not_clobber_when_exiftool_returns_nothing(
         return (r["exif_date"], r["camera"], r["width"]), r["meta_read"]
 
     # whole batch came back empty (exiftool_json returns {} on JSONDecodeError/OSError)
-    monkeypatch.setattr(scan_mod, "exiftool_json", lambda paths, batch: {})
+    monkeypatch.setattr(scan_mod, "exiftool_json", lambda paths, batch, **kw: {})
     scan_mod.read_metadata_pending(conn, Config())
     assert cols() == (known, 0), "a transient exiftool failure must stay retryable"
 
     # batch worked but this path got no record: individually unreadable -> done, not clobbered
     monkeypatch.setattr(
-        scan_mod, "exiftool_json", lambda paths, batch: {"C:/somewhere/else.jpg": {"Model": "X"}}
+        scan_mod,
+        "exiftool_json",
+        lambda paths, batch, **kw: {"C:/somewhere/else.jpg": {"Model": "X"}},
     )
     scan_mod.read_metadata_pending(conn, Config())
     assert cols() == (known, 1)
@@ -221,7 +223,7 @@ def test_read_metadata_pending_picks_up_planned_and_copied_rows(tmp_path: Path, 
     conn.commit()
 
     monkeypatch.setattr(
-        scan_mod, "exiftool_json", lambda paths, batch: {p: {"Model": "Echo"} for p in paths}
+        scan_mod, "exiftool_json", lambda paths, batch, **kw: {p: {"Model": "Echo"} for p in paths}
     )
     scan_mod.read_metadata_pending(conn, Config())
 
@@ -232,4 +234,66 @@ def test_read_metadata_pending_picks_up_planned_and_copied_rows(tmp_path: Path, 
     assert state["planned"] == (1, "Echo")
     assert state["copied"] == (1, "Echo")
     assert state["error"] == (0, None), "error rows are durable - leave them alone"
+    conn.close()
+
+
+def test_video_metadata_prefers_creation_date_over_create_date(tmp_path, monkeypatch):
+    """CreationDate (QuickTime Keys, tz-aware, what iPhones write) wins over CreateDate."""
+    from photoflow.config import Config
+    from photoflow.scan import read_metadata_pending
+
+    conn = open_db(tmp_path / "work")
+    conn.execute(
+        "INSERT INTO files(source_path, kind, status, content_hash, meta_read) VALUES (?,?,?,?,0)",
+        ("C:/clips/IMG_0735.MOV", "video", "scanned", "cafe" * 16),
+    )
+    conn.commit()
+
+    import photoflow.scan as scan_mod
+
+    monkeypatch.setattr(
+        scan_mod,
+        "exiftool_json",
+        lambda paths, batch, **kw: {
+            p: {
+                "CreationDate": "2010:09:04 04:03:31+12:00",
+                "CreateDate": "2010:09:03 16:03:31",
+                "MediaCreateDate": "2010:09:03 16:03:31",
+            }
+            for p in paths
+        },
+    )
+    read_metadata_pending(conn, Config())
+    assert conn.execute("SELECT exif_date FROM files").fetchone()[0] == "2010:09:04 04:03:31+12:00"
+    conn.close()
+
+
+def test_failed_video_subcall_does_not_mark_video_rows_done(tmp_path: Path, monkeypatch):
+    """The 'batch came back non-empty' heuristic is per exiftool invocation, not per row batch.
+
+    An image sub-call that succeeds must not make a failed video sub-call look successful.
+    """
+    import photoflow.scan as scan_mod
+    from photoflow.config import Config
+
+    conn = open_db(tmp_path / "work")
+    for name, kind in (("photo.jpg", "image"), ("clip.mov", "video")):
+        conn.execute(
+            "INSERT INTO files(source_path, kind, status, content_hash, meta_read)"
+            " VALUES (?,?,?,?,0)",
+            (str(tmp_path / name), kind, "scanned", "d0d0" * 16 + name[:1]),
+        )
+    conn.commit()
+
+    def fake(paths, batch, *, fast=True):
+        # images (fast=True) come back with a record for a path nobody asked about; the
+        # video call (fast=False) fails outright and returns nothing.
+        return {"C:/somewhere/else.jpg": {"Model": "X"}} if fast else {}
+
+    monkeypatch.setattr(scan_mod, "exiftool_json", fake)
+    scan_mod.read_metadata_pending(conn, Config())
+
+    state = {r["kind"]: r["meta_read"] for r in conn.execute("SELECT kind, meta_read FROM files")}
+    assert state["image"] == 1, "the image sub-call worked: that path is individually unreadable"
+    assert state["video"] == 0, "the video sub-call failed: retry it next run"
     conn.close()
