@@ -39,7 +39,22 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("scan", help="fingerprint source folders into the manifest")
-    p.add_argument("sources", nargs="+")
+    p.add_argument(
+        "sources",
+        nargs="*",
+        help="source folders to scan (with --refresh-meta: path prefixes to limit the refresh)",
+    )
+    p.add_argument(
+        "--refresh-meta",
+        action="store_true",
+        help="re-read exiftool metadata for rows already in the manifest (no re-hash, no copy)",
+    )
+    p.add_argument(
+        "--kind",
+        action="append",
+        choices=["image", "raw", "video", "sidecar"],
+        help="with --refresh-meta: limit to this kind (repeatable)",
+    )
 
     sub.add_parser("plan", help="resolve dates, group dupes, queue reviews")
     sub.add_parser("review", help="export review.html + decisions.csv")

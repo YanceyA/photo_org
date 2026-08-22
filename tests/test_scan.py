@@ -351,3 +351,94 @@ def test_read_metadata_pending_stores_the_first_parseable_date(
 
     assert conn.execute("SELECT exif_date FROM files").fetchone()[0] == expect
     conn.close()
+
+
+def test_first_parseable_date_respects_configured_min_year():
+    import dataclasses
+
+    from photoflow.config import Config
+    from photoflow.scan import _first_parseable_date
+
+    rec = {
+        "CreationDate": "1985:06:01 12:00:00",
+        "DateTimeOriginal": "2015:07:14 10:30:00",
+    }
+    lenient = dataclasses.replace(Config(), min_year=1970)
+    assert _first_parseable_date(rec, lenient.min_year) == "1985:06:01 12:00:00"
+    assert _first_parseable_date(rec, Config().min_year) == "2015:07:14 10:30:00"
+
+
+def test_like_prefix_escapes_sql_wildcards():
+    # Windows source roots contain '_' constantly (H:\_photos_backup); '_' is a LIKE wildcard.
+    from photoflow.scan import _like_prefix
+
+    assert _like_prefix(r"H:\_photos") == r"H:\~_photos%"
+    assert _like_prefix("a%b~c") == "a~%b~~c%"
+
+
+@pytest.mark.exiftool
+def test_refresh_meta_rereads_copied_rows_without_rehashing(tmp_path: Path):
+    from conftest import _set_exif
+
+    src = tmp_path / "src"
+    src.mkdir()
+    img = src / "beach.jpg"
+    _gradient(640, 480, seed=49).save(img, "JPEG", quality=92)
+    _set_exif(img, DateTimeOriginal="2015:07:14 10:30:00", Model="Canon EOS 70D")
+    work, lib = tmp_path / "work", tmp_path / "lib"
+    pf(work, "scan", str(src))
+    pf(work, "plan")
+    pf(work, "apply", "--out", str(lib))
+
+    before = q(work, "SELECT content_hash, status FROM files")[0]
+    assert before["status"] == "copied"
+    conn = open_db(work)
+    conn.execute("UPDATE files SET exif_date='STALE', camera=NULL")
+    conn.commit()
+    conn.close()
+
+    out = pf(work, "scan", "--refresh-meta", "--kind", "image").stdout
+    row = q(work, "SELECT * FROM files")[0]
+    assert row["exif_date"] == "2015:07:14 10:30:00"
+    assert row["camera"] == "Canon EOS 70D"
+    assert row["content_hash"] == before["content_hash"]  # never re-hashed
+    assert row["status"] == "copied"  # lifecycle untouched
+    assert "1 manifest rows marked for metadata refresh" in out
+    assert "Next: photoflow plan" in out
+
+
+@pytest.mark.exiftool
+def test_refresh_meta_kind_and_prefix_filters(tmp_path: Path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    _gradient(320, 240, seed=50).save(a / "one.jpg", "JPEG", quality=92)
+    _gradient(320, 240, seed=51).save(b / "two.jpg", "JPEG", quality=92)
+    work = tmp_path / "work"
+    pf(work, "scan", str(a), str(b))
+    conn = open_db(work)
+    conn.execute("UPDATE files SET meta_read=1, exif_date='STALE'")
+    conn.commit()
+    conn.close()
+
+    pf(work, "scan", "--refresh-meta", "--kind", "video", str(a))  # kind AND prefix
+    assert all(r["exif_date"] == "STALE" for r in q(work, "SELECT exif_date FROM files"))
+
+    pf(work, "scan", "--refresh-meta", "--kind", "image", str(a))  # only tree a
+    rows = {Path(r["source_path"]).name: r for r in q(work, "SELECT * FROM files")}
+    assert rows["one.jpg"]["exif_date"] is None  # re-read: this JPEG has no EXIF date
+    assert rows["one.jpg"]["meta_read"] == 1
+    assert rows["two.jpg"]["exif_date"] == "STALE"  # outside the prefix
+
+
+def test_scan_without_sources_or_refresh_meta_is_an_error(tmp_path: Path):
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "photoflow", "--workdir", str(tmp_path / "wd"), "scan"],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert "refresh-meta" in (proc.stdout + proc.stderr)

@@ -7,15 +7,57 @@ import sys
 from pathlib import Path
 
 from photoflow.audit import log_action
-from photoflow.dates import parse_exif_date
+from photoflow.dates import MIN_YEAR_DEFAULT, parse_exif_date
 from photoflow.exiftool import exiftool_available, exiftool_json
 from photoflow.hashing import HAVE_HEIF, HAVE_IMAGEHASH, content_hash, perceptual_hash
 from photoflow.models import classify
 
 
+def _like_prefix(prefix: str) -> str:
+    """SQL LIKE pattern matching everything under `prefix`, with wildcards escaped.
+
+    Windows source roots are full of '_' (H:\\_photos_backup) and '_' is a LIKE wildcard,
+    so the pattern is escaped and used with ESCAPE '~'.
+    """
+    esc = prefix.replace("~", "~~").replace("%", "~%").replace("_", "~_")
+    return esc + "%"
+
+
+def _refresh_meta(conn, args, cfg) -> None:
+    """Re-run only the exiftool pass over rows already in the manifest.
+
+    Repairs metadata for files whose bytes never changed but whose read was wrong (e.g. the
+    video dates fixed in this lane). Never re-hashes, never changes `status`, and applies to
+    `copied` rows too - `plan` then recomputes date_taken for them (planner.py:30,132,142)
+    and `refile` moves the library file to match.
+    """
+    where, params = [], []
+    kinds = args.kind or []
+    if kinds:
+        where.append("kind IN ({})".format(",".join("?" * len(kinds))))
+        params += kinds
+    prefixes = [str(Path(s).expanduser().resolve()) for s in (args.sources or [])]
+    if prefixes:
+        where.append(" OR ".join(["source_path LIKE ? ESCAPE '~'"] * len(prefixes)))
+        params += [_like_prefix(p) for p in prefixes]
+    sql = "UPDATE files SET meta_read=0"
+    if where:
+        sql += " WHERE " + " AND ".join(f"({w})" for w in where)
+    n = conn.execute(sql, params).rowcount
+    conn.commit()
+    print(f"{n} manifest rows marked for metadata refresh")
+    read_metadata_pending(conn, cfg)
+    print("refresh complete. Next: photoflow plan")
+
+
 def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
     if not exiftool_available():
         sys.exit("exiftool not found on PATH - install it first (see README).")
+    if getattr(args, "refresh_meta", False):
+        _refresh_meta(conn, args, cfg)
+        return
+    if not args.sources:
+        sys.exit("scan: give at least one source folder, or use --refresh-meta [PREFIX ...]")
     if not HAVE_IMAGEHASH:
         print(
             "NOTE: Pillow/ImageHash not installed - near-dupe flagging disabled, "
@@ -133,17 +175,20 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
 DATE_TAGS = ("CreationDate", "DateTimeOriginal", "CreateDate", "MediaCreateDate")
 
 
-def _first_parseable_date(rec: dict) -> str | None:
+def _first_parseable_date(rec: dict, min_year: int = MIN_YEAR_DEFAULT) -> str | None:
     """Pick the first DATE_TAGS value that actually parses, as the raw exiftool string.
 
     Preference alone is not enough: wild files carry "0000:00:00 00:00:00" and similar junk,
     and a garbage CreationDate must not shadow a good DateTimeOriginal. If nothing parses, the
     first *present* value is returned anyway so plan's existing bad-date handling (and anyone
     reading the manifest) still sees what the file claimed, rather than a silent NULL.
+
+    `min_year` is threaded through to `parse_exif_date` so a configured `photoflow.toml`
+    (e.g. `min_year = 1970`) picks the same tag `plan` would accept.
     """
-    present = [str(rec[t]) for t in DATE_TAGS if rec.get(t) is not None]
+    present = [str(rec[t]) for t in DATE_TAGS if rec.get(t)]
     for v in present:
-        if parse_exif_date(v) is not None:
+        if parse_exif_date(v, min_year) is not None:
             return v
     return present[0] if present else None
 
@@ -188,7 +233,7 @@ def read_metadata_pending(conn, cfg) -> int:
                 if src:
                     conn.execute("UPDATE files SET meta_read=1 WHERE id=?", (r["id"],))
                 continue
-            raw_date = _first_parseable_date(rec)
+            raw_date = _first_parseable_date(rec, cfg.min_year)
             conn.execute(
                 "UPDATE files SET exif_date=?, camera=?, width=?, height=?, meta_read=1 WHERE id=?",
                 (
