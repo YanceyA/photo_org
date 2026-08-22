@@ -119,8 +119,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
     if "meta_read" not in cols:
         # 0 = "exiftool has not read this row yet". Pre-existing rows were read by the old
-        # inline pass, but re-reading them is harmless (and scan --refresh-meta wants exactly
-        # this flag), so defaulting to 0 is the safe direction.
+        # inline pass; re-reading them is harmless because read_metadata_pending never
+        # clobbers known values when exiftool returns no record. The cost is a one-time
+        # metadata pass over existing rows on the next scan.
         conn.execute("ALTER TABLE files ADD COLUMN meta_read INTEGER DEFAULT 0")
         conn.commit()
 

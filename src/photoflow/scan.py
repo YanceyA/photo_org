@@ -80,7 +80,8 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
                        VALUES (?,?,?,?,?,?,?)
                        ON CONFLICT(source_path) DO UPDATE SET
                          size=excluded.size, mtime=excluded.mtime, status='scanned',
-                         content_hash=NULL, phash=NULL, meta_read=0""",
+                         content_hash=NULL, phash=NULL, meta_read=0,
+                         exif_date=NULL, camera=NULL, width=NULL, height=NULL""",
                     (
                         sp,
                         str(root),
@@ -131,12 +132,14 @@ def read_metadata_pending(conn, cfg) -> int:
 
     Manifest-driven for the same reasons as phash_pending_images: an IN(<paths>) clause
     overflows SQLite's 32766-variable cap on large imports, and an interrupted scan resumes
-    here instead of losing the pass. meta_read is set to 1 per batch even when exiftool
-    returned nothing for a path - otherwise a tag-less file is retried on every future run.
+    here instead of losing the pass. exiftool emits a record (with SourceFile) even for a
+    tag-less file, so those are marked done per batch instead of being retried forever; a path
+    with no record at all is missing/offline and keeps whatever the manifest already knows.
     """
     rows = conn.execute(
         "SELECT id, source_path, kind FROM files "
-        "WHERE status='scanned' AND content_hash IS NOT NULL AND meta_read=0"
+        "WHERE content_hash IS NOT NULL AND meta_read=0 "
+        "AND status NOT IN ('error','skipped_manual')"
     ).fetchall()
     if not rows:
         return 0
@@ -146,7 +149,16 @@ def read_metadata_pending(conn, cfg) -> int:
         batch = rows[i : i + cfg.exiftool_batch]
         meta = exiftool_json([r["source_path"] for r in batch], cfg.exiftool_batch)
         for r in batch:
-            rec = meta.get(r["source_path"], {})
+            rec = meta.get(r["source_path"])
+            if rec is None:
+                # exiftool emitted no record: the file is missing/offline or the whole batch
+                # failed. Never clobber what the manifest already knows. If the batch as a
+                # whole came back non-empty this path is individually unreadable -> mark it
+                # done so it isn't retried forever; if the batch is entirely empty, leave
+                # meta_read=0 so a transient exiftool failure is retried next run.
+                if meta:
+                    conn.execute("UPDATE files SET meta_read=1 WHERE id=?", (r["id"],))
+                continue
             raw_date = (
                 rec.get("DateTimeOriginal") or rec.get("CreateDate") or rec.get("MediaCreateDate")
             )

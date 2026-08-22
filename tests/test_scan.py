@@ -168,3 +168,68 @@ def test_read_metadata_pending_is_manifest_driven_and_marks_rows_done(tmp_path: 
         ]
         == "TOUCHED"
     )
+    conn.close()
+
+
+def test_read_metadata_pending_does_not_clobber_when_exiftool_returns_nothing(
+    tmp_path: Path, monkeypatch
+):
+    """No record for a path means missing/offline - never overwrite what the manifest knows."""
+    import photoflow.scan as scan_mod
+    from photoflow.config import Config
+
+    conn = open_db(tmp_path / "work")
+    sp = str(tmp_path / "offline.jpg")
+    conn.execute(
+        "INSERT INTO files(source_path, kind, status, content_hash, meta_read,"
+        " exif_date, camera, width) VALUES (?,?,?,?,0,?,?,?)",
+        (sp, "image", "scanned", "beefcafe" * 8, "2011:01:02 03:04:05", "Nikon D90", 4000),
+    )
+    conn.commit()
+    known = ("2011:01:02 03:04:05", "Nikon D90", 4000)
+
+    def cols():
+        r = conn.execute("SELECT * FROM files WHERE source_path=?", (sp,)).fetchone()
+        return (r["exif_date"], r["camera"], r["width"]), r["meta_read"]
+
+    # whole batch came back empty (exiftool_json returns {} on JSONDecodeError/OSError)
+    monkeypatch.setattr(scan_mod, "exiftool_json", lambda paths, batch: {})
+    scan_mod.read_metadata_pending(conn, Config())
+    assert cols() == (known, 0), "a transient exiftool failure must stay retryable"
+
+    # batch worked but this path got no record: individually unreadable -> done, not clobbered
+    monkeypatch.setattr(
+        scan_mod, "exiftool_json", lambda paths, batch: {"C:/somewhere/else.jpg": {"Model": "X"}}
+    )
+    scan_mod.read_metadata_pending(conn, Config())
+    assert cols() == (known, 1)
+    conn.close()
+
+
+def test_read_metadata_pending_picks_up_planned_and_copied_rows(tmp_path: Path, monkeypatch):
+    """An interrupted pass leaves rows that plan then advances; they must still be re-read."""
+    import photoflow.scan as scan_mod
+    from photoflow.config import Config
+
+    conn = open_db(tmp_path / "work")
+    for status in ("planned", "copied", "error"):
+        conn.execute(
+            "INSERT INTO files(source_path, kind, status, content_hash, meta_read)"
+            " VALUES (?,?,?,?,0)",
+            (str(tmp_path / f"{status}.jpg"), "image", status, "cafe1234" * 8),
+        )
+    conn.commit()
+
+    monkeypatch.setattr(
+        scan_mod, "exiftool_json", lambda paths, batch: {p: {"Model": "Echo"} for p in paths}
+    )
+    scan_mod.read_metadata_pending(conn, Config())
+
+    state = {
+        r["status"]: (r["meta_read"], r["camera"])
+        for r in conn.execute("SELECT status, meta_read, camera FROM files")
+    }
+    assert state["planned"] == (1, "Echo")
+    assert state["copied"] == (1, "Echo")
+    assert state["error"] == (0, None), "error rows are durable - leave them alone"
+    conn.close()
