@@ -27,6 +27,17 @@ def suggested_keeper_id(members) -> int:
     return best["id"]
 
 
+def is_locked(member) -> bool:
+    """True for a member already copied into the library.
+
+    `apply` only processes status IN ('planned','review'), so any decision the user
+    makes on a copied row is silently ignored. The page therefore renders it as a
+    non-editable keeper and the CSV always says 'keep' for it. Rows without a status
+    column (fixtures / older callers) are never locked.
+    """
+    return "status" in member.keys() and member["status"] == "copied"
+
+
 def decision_rows(groups, prior: dict[str, dict]) -> list[dict]:
     """decisions.csv rows; carries forward decision/merge by file_id (invariant #4)."""
     rows = []
@@ -34,6 +45,10 @@ def decision_rows(groups, prior: dict[str, dict]) -> list[dict]:
         best_id = suggested_keeper_id(members)
         for m in members:
             old = prior.get(str(m["id"]), {})
+            # A locked member's decision is not the user's to change: override whatever
+            # the CSV says (invariant #4 carries forward *user* decisions, and this is
+            # not one) so apply and the page can never disagree.
+            decision = "keep" if is_locked(m) else old.get("decision", "")
             rows.append(
                 {
                     "group_id": gid,
@@ -42,7 +57,7 @@ def decision_rows(groups, prior: dict[str, dict]) -> list[dict]:
                     "resolution": f"{m['width']}x{m['height']}",
                     "size_kb": round((m["size"] or 0) / 1024),
                     "suggestion": "keep" if m["id"] == best_id else "keep?",
-                    "decision": old.get("decision", ""),
+                    "decision": decision,
                     "merge_from_file_id": old.get("merge_from_file_id", ""),
                 }
             )
@@ -90,9 +105,8 @@ def build_payload(groups, rows: list[dict], workdir_key: str, thumbs_ok: set) ->
                     "camera": m["camera"],
                     "date": m["date_taken"],
                     "suggested": m["id"] == best_id,
-                    # already copied in an earlier round (its 'keep' is carried forward);
-                    # rows without a status column (fixtures/older callers) are not flagged
-                    "inLibrary": ("status" in m.keys() and m["status"] == "copied"),
+                    # already copied in an earlier round: a keeper the page may not edit
+                    "locked": is_locked(m),
                     "bestRes": px == max_px and px > 0,
                     "bestSize": (m["size"] or 0) == max_size and max_size > 0,
                     "csv": {
@@ -183,9 +197,10 @@ photo of the highlighted group and move on · <kbd>1</kbd>–<kbd>9</kbd> keep t
 <kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>k</kbd>/<kbd>j</kbd>) move · <kbd>h</kbd> hide decided ·
 <kbd>s</kbd> save. Mouse: click <b>Keep</b> on the photo(s) to keep in each group — the rest
 auto-skip — or <b>✓ keep suggested</b> in the group header. Click a keeper again to undo.
-Untouched groups stay on hold. A member tagged <b>in library</b> was already kept in an
-earlier round and a new look-alike has turned up next to it: click its <b>Keep</b> to
-confirm (new one skips), or <b>Keep</b> the new one too. Click a thumbnail to open the
+Untouched groups stay on hold. A member tagged <b>in library</b> was already copied in
+an earlier round: it stays a keeper and can't be clicked. <kbd>Enter</kbd> on such a
+group <b>skips</b> the new look-alikes — click <b>Keep</b> on one only if you really
+want a second copy in the library. Click a thumbnail to open the
 original full size. Selections survive closing the tab; <b>Save decisions.csv</b> writes
 them back into your workdir (overwrite decisions.csv when the picker asks), then run
 <code>photoflow apply</code>.</p>
@@ -197,7 +212,7 @@ const DATA = JSON.parse(document.getElementById("data").textContent);
 const LSKEY = "photoflow-review:" + DATA.workdir;
 const COLS = ["group_id","file_id","source_path","resolution","size_kb",
               "suggestion","decision","merge_from_file_id"];
-const byGid = {}, groupOf = {}, dec = {}, donorOf = {};
+const byGid = {}, groupOf = {}, dec = {}, donorOf = {}, locked = {};
 let fileHandle = null, dirty = false, savedOnce = false, hideDecided = false;
 let saving = false, storageWarned = false;
 let cur = null;  // gid of the keyboard cursor (highlighted group)
@@ -212,7 +227,8 @@ for (const g of DATA.groups) {
   donorOf[g.gid] = null;
   for (const f of g.files) {
     groupOf[f.id] = g.gid;
-    dec[f.id] = norm(f.decision);
+    locked[f.id] = !!f.locked;
+    dec[f.id] = f.locked ? "keep" : norm(f.decision);
     if (dec[f.id] === "keep" && f.merge) donorOf[g.gid] = Number(f.merge);
   }
 }
@@ -221,7 +237,7 @@ try {  // localStorage overlays the CSV baseline (crash insurance)
   if (saved) {
     let restored = false;
     for (const [id, d] of Object.entries(saved.dec || {}))
-      if (id in dec) { dec[id] = norm(d); restored = true; }
+      if (id in dec && !locked[id]) { dec[id] = norm(d); restored = true; }
     for (const [gid, d] of Object.entries(saved.donorOf || {}))
       if (gid in donorOf) { donorOf[gid] = d; restored = true; }
     if (restored) {  // overlay only ever holds unsaved work -> flag it
@@ -260,8 +276,11 @@ function build() {
         : '<div class="meta">(no preview)</div>';
       const badge = (f.kind === "raw" ? '<span class="badge raw">RAW</span>'
         : f.kind === "video" ? '<span class="badge video">VIDEO</span>' : "") +
-        (f.inLibrary ? '<span class="badge lib" ' +
+        (f.locked ? '<span class="badge lib" ' +
           'title="already copied into the library in an earlier round">in library</span>' : "");
+      const keepbtn = f.locked
+        ? '<button class="keepbtn on" disabled title="already in the library">Keep</button>'
+        : '<button class="keepbtn" onclick="pf.keep(' + f.id + ')">Keep</button>';
       cards += '<div class="f" id="f' + f.id + '">' +
         '<span class="num">' + (i + 1) + '</span>' +
         '<div class="thumb">' + img + '</div>' +
@@ -273,14 +292,14 @@ function build() {
         '</div><div class="meta">' + esc(f.camera || "unknown camera") + " \\u00b7 " +
         esc(f.date || "no date") + '</div><div class="path" title="' + esc(f.path) + '">' +
         esc(f.path) + "</div>" +
-        '<div class="actions">' +
-        '<button class="keepbtn" onclick="pf.keep(' + f.id + ')">Keep</button>' +
+        '<div class="actions">' + keepbtn +
         '<button class="donate" onclick="pf.donate(' + f.id + ')" ' +
         'title="copy missing metadata (GPS, dates) from this file into the keeper">' +
         "\\u2192 donate metadata</button></div>" +
         '<div class="state"></div></div>';
     });
     div.innerHTML = "<h3>group " + g.gid + " \\u00b7 " + g.files.length + " files " +
+      '<span class="keepcount"></span>' +
       '<button class="acceptbtn" onclick="pf.accept(' + g.gid + ')" ' +
       'title="keep the suggested photo, skip the rest (Enter)">\\u2713 keep suggested</button>' +
       '</h3><div class="cards">' + cards + "</div>";
@@ -308,30 +327,36 @@ function setCursor(gid, scroll) {
 function acceptSuggested(gid) {  // keep the suggested member (rest skip), then advance
   const g = byGid[gid];
   if (!groupDecided(g)) {
-    const s = g.files.find((f) => f.suggested) || g.files[0];
-    clickKeep(s.id);  // handles both fresh groups and a carried-forward keeper (confirm)
+    if (g.files.some((f) => f.locked)) {
+      // an in-library keeper already covers this group: never import a look-alike
+      // silently - the new members skip unless the user keeps one explicitly
+      g.files.forEach((f) => { if (!f.locked && !dec[f.id]) dec[f.id] = "skip"; });
+      cur = gid;
+      persist();
+      refresh();
+    } else {
+      const s = g.files.find((f) => f.suggested) || g.files[0];
+      clickKeep(s.id);
+    }
   }
   setCursor(nextVisible(gid, +1), true);
 }
 
 function clickKeep(id) {
+  if (locked[id]) return;  // in-library keeper: apply can't act on it, so nor can you
   const gid = groupOf[id], mem = byGid[gid].files;
   cur = gid;  // Enter continues from the group you last touched
-  if (dec[id] === "keep" && mem.some((f) => !dec[f.id])) {
-    // keeper carried forward from an earlier round, group still has undecided
-    // members: re-clicking confirms it -> the rest auto-skip (same rule as a fresh click)
-    mem.forEach((f) => { if (!dec[f.id]) dec[f.id] = "skip"; });
-  } else if (dec[id] === "keep") {
+  if (dec[id] === "keep") {
     dec[id] = "";
-    if (!mem.some((f) => dec[f.id] === "keep")) {
+    if (mem.some((f) => f.locked || dec[f.id] === "keep")) {
+      dec[id] = "skip";  // another keeper remains; this one becomes a skip
+    } else {
       mem.forEach((f) => (dec[f.id] = ""));  // zero keepers: whole group back to hold
       donorOf[gid] = null;
-    } else {
-      dec[id] = "skip";  // other keepers remain; this one becomes a skip
     }
   } else {
-    dec[id] = "keep";
-    mem.forEach((f) => { if (dec[f.id] !== "keep") dec[f.id] = "skip"; });
+    dec[id] = "keep";  // keeps IN ADDITION to any locked keeper in this group
+    mem.forEach((f) => { if (!f.locked && dec[f.id] !== "keep") dec[f.id] = "skip"; });
     if (donorOf[gid] === id) donorOf[gid] = null;
   }
   persist();
@@ -392,6 +417,8 @@ function refresh() {
     gdiv.classList.toggle("decided", isDecided);
     gdiv.classList.toggle("cur", g.gid === cur);
     gdiv.style.display = groupVisible(g) ? "" : "none";
+    const keeps = g.files.filter((f) => dec[f.id] === "keep").length;
+    gdiv.querySelector(".keepcount").textContent = keeps > 1 ? keeps + " keepers" : "";
     for (const f of g.files) {
       const el = document.getElementById("f" + f.id), d = dec[f.id] || "";
       el.classList.toggle("keep", d === "keep");
@@ -403,7 +430,7 @@ function refresh() {
       don.classList.toggle("on", donorOf[g.gid] === f.id);
       el.querySelector(".state").textContent =
         d === "" ? (f.suggested ? "suggested keeper" : "on hold")
-        : d === "keep" ? (f.inLibrary ? "KEEP \\u00b7 in library" : "KEEP")
+        : d === "keep" ? (f.locked ? "KEEP \\u00b7 in library" : "KEEP")
         : donorOf[g.gid] === f.id ? "skip \\u00b7 donates metadata" : "skip";
     }
   }
@@ -421,9 +448,8 @@ document.getElementById("hide").onchange = (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
-  const tag = e.target && e.target.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-  if (tag === "BUTTON") e.target.blur();  // don't also re-fire the focused button
+  const tag = (e.target && e.target.tagName) || "";
+  if (["BUTTON", "INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
   const k = e.key;
   if (k === "Enter" || k === " ") {
     e.preventDefault();
