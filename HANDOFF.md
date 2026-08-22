@@ -22,8 +22,12 @@ Pipeline stages map to CLI subcommands: `scan → plan → review → apply → 
 
 ## 2. Non-negotiable invariants (preserve in any refactor)
 
-1. **Sources are read-only.** No code path may write to, move, or delete a
-   source file. Output is copy-only (`shutil.copy2`, mtime preserved).
+1. **Sources are read-only.** No code path may write to, move or delete a source
+   file. Output is copy-only (`shutil.copy2` via a `.part` temp + `os.replace`).
+   Library mtime equals source mtime: `copy2` preserves it and every exiftool write
+   (`embed_args`, `merge_metadata`, `enrich apply`) passes `-P` so
+   `-overwrite_original` cannot reset it. Moves *inside* the library (`refile`,
+   `prune-sidecars`) are the only file relocations, and they never touch sources.
 2. **Near-dupes are never auto-deleted.** Perceptual-hash matches only ever
    *flag* for manual review. Only exact content-hash matches are auto-skipped.
 3. **Manual decisions are durable.** `skipped_manual` status survives re-plans;
@@ -203,6 +207,25 @@ prototype — no binary assets in the repo, generate with Pillow:
 8. **Schema migrations** runner keyed on `schema_version`.
 9. **Immich integration notes:** external library mode reads this layout +
    XMP directly; document, don't integrate.
+
+Known follow-ups from the 2026-08 review pass:
+
+10. A tag blacklisted *after* it was already embedded in some files is not
+    retroactively stripped from them (`enrich apply` only skips re-adding it
+    going forward).
+11. `apply --retry-errors` — durable `error` rows currently need a manual DB
+    fix; a flag to re-attempt them would close the loop the printed hint
+    describes.
+12. `refile` doesn't prune the empty `YYYY/MM` folders it leaves behind.
+13. When two distinct files collide on the same destination name, `apply`
+    can record `dest_path` on a second row whose bytes were never actually
+    copied (pre-existing edge case, not introduced by the refile/prune work).
+14. **QuickTime `CreateDate` timezone caveat:** `mvhd` atoms store UTC per
+    spec, so exiftool's `QuickTimeUTC`-adjusted `CreateDate` is converted to
+    the *scanning machine's* local zone; a device that (non-compliantly)
+    writes local time into `mvhd` will have its date shifted by the zone
+    offset. Worth a spot-check if video dates look off by a fixed number of
+    hours.
 
 ## 9. Acceptance criteria for the refactor
 

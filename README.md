@@ -16,10 +16,10 @@ content, preserves folder/filename context as XMP metadata, and logs every actio
    - Linux: `apt install libimage-exiftool-perl`
 3. Python deps: `uv sync` (installs the package plus dev/image deps). Without uv:
    `pip install -e .[images]` for the optional image extras.
-   - The image extras (Pillow/ImageHash/pillow-heif) are optional, but without
-     Pillow/ImageHash you lose near-dupe flagging and review thumbnails (exact
-     dedupe still works). pillow-heif enables HEIC thumbnails/phash for iPhone
-     photos.
+   - `pillow-heif` is a **hard dependency** (declared in `pyproject.toml`), so
+     HEIC thumbnails/phash always work.
+   - Pillow/ImageHash are optional extras: without them you lose near-dupe
+     flagging and review thumbnails (exact dedupe still works).
 
 ## Workflow
 
@@ -89,6 +89,54 @@ duplicates. Re-running any step is safe (idempotent).
 - **Audit trail** — every action (scanned/copied/skipped/merged, with reasons)
   goes to the `actions` table in `photoflow_work/photoflow.db` and to
   `photoflow_work/logs/run_NNNN_<cmd>.jsonl`.
+
+## Capture One / Lightroom libraries
+
+Point `scan` at the **catalog folder** (a Capture One managed catalog is a folder
+containing `<name>.cocatalogdb` plus `Originals/`) or at the **session root**
+(`Capture/`, `Selects/`, `Output/`, `CaptureOne/`). photoflow ingests the pixel
+files it finds under them — `Originals/`, `Capture/`, exports in `Output/` — and
+dedupes across all of it.
+
+What it does **not** carry over: adjustments (`.cos` settings, the settings inside
+an `.eip`), variants, ratings, colour tags and catalog keywords. Those live in the
+catalog database, not in the image files; photoflow is a pixel organizer, so it
+copies the pixels and writes its own provenance XMP.
+
+`exclude_dirs` prunes the noise directories by default — `CaptureOne`, `Cache`,
+`Proxies`, `Thumbnails`, `Trash`, `$RECYCLE.BIN`, `*.lrdata` preview trees,
+`@eaDir`, `__MACOSX` — matched case-insensitively against every path component, so
+a session's `Trash/` or a Lightroom previews tree is never ingested. Canon `.crw`,
+Phase One `.iiq` and Capture One `.eip` are in the default `raw_ext` set.
+
+Two caveats worth knowing: a RAW and its JPEG only pair when they share a stem in
+the *same* folder (a `Capture/` RAW and its `Output/` export stay unlinked, both
+kept), and `enrich` runs on images only — RAW and video files get no people or
+content tags (their JPEG twins usually do).
+
+## Repair runbook (existing library)
+
+These commands change files **inside the library** (never sources) and all support
+`--dry-run`. Run the dry run, read it, then run it for real.
+
+```
+photoflow scan --refresh-meta --kind video   # re-read metadata only, no re-hash
+photoflow plan                               # recompute dates from the new metadata
+photoflow refile --out "D:/Photos-Organized" --dry-run
+photoflow refile --out "D:/Photos-Organized"          # move files to their new YYYY/MM
+photoflow prune-sidecars --out "D:/Photos-Organized" --dry-run
+photoflow prune-sidecars --out "D:/Photos-Organized"  # evict copied .thm/.aae/.xmp
+```
+
+`refile` moves a copied file (and its `.xmp` sidecar) when `plan` resolved a better
+date for it; `prune-sidecars` moves already-copied sidecars into
+`photoflow_work/pruned/` — neither ever deletes anything.
+
+**Immich note.** Both commands change paths, so an Immich external library sees
+removals and additions: rescan the library afterwards. Routine `apply` /
+`enrich apply` runs no longer churn Immich — exiftool is called with `-P`, so the
+library file's mtime keeps matching its source and unchanged files are not
+re-indexed or re-uploaded by mtime-based backups.
 
 ## Enrich: people + content tags (optional)
 
@@ -298,9 +346,12 @@ or the vocab.
 ## Files it manages
 
 Images: jpg jpeg png heic heif tif tiff bmp gif webp
-RAW: cr2 cr3 nef arw dng orf rw2 raf pef srw x3f
+RAW: cr2 cr3 crw nef nrw arw sr2 srf dng orf rw2 raf pef srw x3f iiq 3fr eip
+     erf mrw rwl mef kdc dcr
 Video: mov mp4 m4v avi mts m2ts 3gp wmv mpg mpeg (exact dedupe only — no
 perceptual matching, per your "no resized videos" assumption)
+Sidecars: xmp aae thm (fingerprinted for dedupe/audit, never copied — see
+`copy_sidecars`)
 
 ## Tuning
 
@@ -320,14 +371,25 @@ min_year = 1985
 - `exiftool_batch` (200) — files per exiftool invocation.
 - `image_ext` / `raw_ext` / `video_ext` / `sidecar_ext` — the extension sets
   listed above.
+- `copy_sidecars` (false) — copy `.thm/.aae/.xmp` files into the library too.
+- `exclude_dirs` — directory names pruned during `scan`, matched
+  case-insensitively per path component.
+- `min_size_bytes` (0) — skip files smaller than this; `20000` is a sensible
+  value for thumbnail-laden sources.
 
 ## Performance notes (tens of thousands of files)
 
 Scan is the slow step: full-content hashing is disk-bound (expect roughly the
 time it takes to read the data once), pHash adds a decode per image, ExifTool
 runs in batches of 200. A 50k-file library is typically an evening, and it
-commits progress as it goes — you can re-run scan and it skips anything
-already fingerprinted (matched by path+size+mtime).
+commits progress as it goes.
+
+**Resume rule.** A path already in the manifest is re-fingerprinted only when its
+size or mtime changed (±1 s, for FAT/exFAT), *and* only rows that actually finished
+hashing count as done — a row whose `content_hash` is still NULL is picked up again
+on the next `scan`, so an interrupted scan cannot silently drop files. Metadata
+reads are manifest-driven for the same reason. Nothing is re-hashed just because you
+re-ran the command.
 
 ## Safety model
 
