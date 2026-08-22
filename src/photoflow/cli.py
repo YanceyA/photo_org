@@ -47,7 +47,10 @@ def main():
     p.add_argument(
         "--refresh-meta",
         action="store_true",
-        help="re-read exiftool metadata for rows already in the manifest (no re-hash, no copy)",
+        help=(
+            "re-read exiftool metadata for rows already in the manifest (no re-hash, no copy); "
+            "rows in error/skipped_manual are left alone"
+        ),
     )
     p.add_argument(
         "--kind",

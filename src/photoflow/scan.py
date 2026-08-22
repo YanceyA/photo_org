@@ -14,10 +14,13 @@ from photoflow.models import classify
 
 
 def _like_prefix(prefix: str) -> str:
-    """SQL LIKE pattern matching everything under `prefix`, with wildcards escaped.
+    """Escape a string for use as a SQL LIKE pattern, then append the '%' wildcard.
 
-    Windows source roots are full of '_' (H:\\_photos_backup) and '_' is a LIKE wildcard,
-    so the pattern is escaped and used with ESCAPE '~'.
+    A pure escaper: it does not add a path-separator boundary. Windows source roots are full
+    of '_' (H:\\_photos_backup) and '_' is a LIKE wildcard, so '~', '%', and '_' are escaped
+    and the pattern must be used with ESCAPE '~'. The caller is responsible for bounding
+    `prefix` at a path separator first, so e.g. "...\\photos" does not also match
+    "...\\photos_backup\\..." — see `_refresh_meta`.
     """
     esc = prefix.replace("~", "~~").replace("%", "~%").replace("_", "~_")
     return esc + "%"
@@ -29,20 +32,31 @@ def _refresh_meta(conn, args, cfg) -> None:
     Repairs metadata for files whose bytes never changed but whose read was wrong (e.g. the
     video dates fixed in this lane). Never re-hashes, never changes `status`, and applies to
     `copied` rows too - `plan` then recomputes date_taken for them (planner.py:30,132,142)
-    and `refile` moves the library file to match.
+    and `refile` moves the library file to match. Rows already in status error/skipped_manual
+    are always excluded, matching read_metadata_pending's own exclusion - otherwise this would
+    mark them meta_read=0 and they would never actually get re-read.
     """
-    where, params = [], []
+    where = ["status NOT IN ('error','skipped_manual')"]
+    params: list = []
     kinds = args.kind or []
     if kinds:
         where.append("kind IN ({})".format(",".join("?" * len(kinds))))
         params += kinds
     prefixes = [str(Path(s).expanduser().resolve()) for s in (args.sources or [])]
     if prefixes:
-        where.append(" OR ".join(["source_path LIKE ? ESCAPE '~'"] * len(prefixes)))
-        params += [_like_prefix(p) for p in prefixes]
-    sql = "UPDATE files SET meta_read=0"
-    if where:
-        sql += " WHERE " + " AND ".join(f"({w})" for w in where)
+        # Bound each prefix at a path separator before escaping, so a prefix like
+        # "...\photos" matches only that directory's contents and not a sibling directory
+        # with the same leading name, e.g. "...\photos_backup\...". Bare drive roots
+        # (e.g. "C:\") already resolve with a trailing separator, so rstrip+append is a no-op
+        # there.
+        bounded = [p.rstrip(os.sep) + os.sep for p in prefixes]
+        where.append(" OR ".join(["source_path LIKE ? ESCAPE '~'"] * len(bounded)))
+        # SQLite LIKE case-folds ASCII only. That's the desirable behaviour for Windows
+        # drive letters/extensions, but non-ASCII path segments still match case-sensitively.
+        params += [_like_prefix(p) for p in bounded]
+    if not kinds and not prefixes:
+        print("(no --kind or prefix given: refreshing the whole manifest)")
+    sql = "UPDATE files SET meta_read=0 WHERE " + " AND ".join(f"({w})" for w in where)
     n = conn.execute(sql, params).rowcount
     conn.commit()
     print(f"{n} manifest rows marked for metadata refresh")

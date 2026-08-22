@@ -442,3 +442,57 @@ def test_scan_without_sources_or_refresh_meta_is_an_error(tmp_path: Path):
     )
     assert proc.returncode != 0
     assert "refresh-meta" in (proc.stdout + proc.stderr)
+
+
+@pytest.mark.exiftool
+def test_refresh_meta_prefix_matches_whole_path_components(tmp_path: Path):
+    # "...\photos" must not also match a sibling directory like "...\photos_backup\...".
+    photos = tmp_path / "photos"
+    photos_backup = tmp_path / "photos_backup"
+    photos.mkdir()
+    photos_backup.mkdir()
+    _gradient(320, 240, seed=60).save(photos / "one.jpg", "JPEG", quality=92)
+    _gradient(320, 240, seed=61).save(photos_backup / "two.jpg", "JPEG", quality=92)
+    work = tmp_path / "work"
+    pf(work, "scan", str(photos), str(photos_backup))
+    conn = open_db(work)
+    conn.execute("UPDATE files SET meta_read=1, exif_date='STALE'")
+    conn.commit()
+    conn.close()
+
+    pf(work, "scan", "--refresh-meta", str(photos))
+    rows = {Path(r["source_path"]).name: r for r in q(work, "SELECT * FROM files")}
+    assert rows["one.jpg"]["exif_date"] is None  # re-read: this fixture has no EXIF date
+    assert rows["one.jpg"]["meta_read"] == 1
+    assert rows["two.jpg"]["exif_date"] == "STALE"  # photos_backup is not under photos/
+
+
+def test_refresh_meta_skips_error_and_skipped_manual_rows(tmp_path: Path, monkeypatch):
+    import argparse
+
+    import photoflow.scan as scan_mod
+    from photoflow.config import Config
+
+    conn = open_db(tmp_path / "work")
+    conn.executemany(
+        "INSERT INTO files(source_path, kind, status, content_hash, meta_read) VALUES (?,?,?,?,1)",
+        [
+            (str(tmp_path / "err.jpg"), "image", "error", "a" * 64),
+            (str(tmp_path / "skip.jpg"), "image", "skipped_manual", "b" * 64),
+            (str(tmp_path / "ok.jpg"), "image", "copied", "c" * 64),
+        ],
+    )
+    conn.commit()
+
+    monkeypatch.setattr(scan_mod, "exiftool_json", lambda paths, batch, **kw: {})
+
+    scan_mod._refresh_meta(conn, argparse.Namespace(kind=None, sources=None), Config())
+
+    state = {
+        Path(r["source_path"]).name: r["meta_read"]
+        for r in conn.execute("SELECT source_path, meta_read FROM files")
+    }
+    assert state["err.jpg"] == 1, "error rows are left alone"
+    assert state["skip.jpg"] == 1, "skipped_manual rows are left alone"
+    assert state["ok.jpg"] == 0, "copied row was reset for re-read"
+    conn.close()
