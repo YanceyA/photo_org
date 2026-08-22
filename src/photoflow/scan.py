@@ -2,18 +2,85 @@
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import sys
 from pathlib import Path
 
 from photoflow.audit import log_action
+from photoflow.dates import MIN_YEAR_DEFAULT, parse_exif_date
 from photoflow.exiftool import exiftool_available, exiftool_json
 from photoflow.hashing import HAVE_HEIF, HAVE_IMAGEHASH, content_hash, perceptual_hash
 from photoflow.models import classify
 
 
+def _like_prefix(prefix: str) -> str:
+    """Escape a string for use as a SQL LIKE pattern, then append the '%' wildcard.
+
+    A pure escaper: it does not add a path-separator boundary. Windows source roots are full
+    of '_' (H:\\_photos_backup) and '_' is a LIKE wildcard, so '~', '%', and '_' are escaped
+    and the pattern must be used with ESCAPE '~'. The caller is responsible for bounding
+    `prefix` at a path separator first, so e.g. "...\\photos" does not also match
+    "...\\photos_backup\\..." — see `_refresh_meta`.
+    """
+    esc = prefix.replace("~", "~~").replace("%", "~%").replace("_", "~_")
+    return esc + "%"
+
+
+def _is_glob(name: str) -> bool:
+    """An exclude_dirs entry is a glob pattern iff it carries a wildcard metacharacter."""
+    return "*" in name or "?" in name
+
+
+def _refresh_meta(conn, args, cfg) -> None:
+    """Re-run only the exiftool pass over rows already in the manifest.
+
+    Repairs metadata for files whose bytes never changed but whose read was wrong (e.g. the
+    video dates fixed in this lane). Never re-hashes, never changes `status`, and applies to
+    `copied` rows too - `plan` then recomputes date_taken for them (planner.py:30,132,142)
+    and `refile` moves the library file to match. Rows already in status error/skipped_manual
+    are always excluded, matching read_metadata_pending's own exclusion - otherwise this would
+    mark them meta_read=0 and they would never actually get re-read.
+    """
+    # content_hash IS NOT NULL mirrors read_metadata_pending's own filter, so the "N rows
+    # marked" count is exactly the set that pass will actually re-read (a row still waiting to
+    # be hashed is already meta_read=0 and gets picked up by the normal resumable pass).
+    where = ["status NOT IN ('error','skipped_manual')", "content_hash IS NOT NULL"]
+    params: list = []
+    kinds = args.kind or []
+    if kinds:
+        where.append("kind IN ({})".format(",".join("?" * len(kinds))))
+        params += kinds
+    prefixes = [str(Path(s).expanduser().resolve()) for s in (args.sources or [])]
+    if prefixes:
+        # Bound each prefix at a path separator before escaping, so a prefix like
+        # "...\photos" matches only that directory's contents and not a sibling directory
+        # with the same leading name, e.g. "...\photos_backup\...". Bare drive roots
+        # (e.g. "C:\") already resolve with a trailing separator, so rstrip+append is a no-op
+        # there.
+        bounded = [p.rstrip(os.sep) + os.sep for p in prefixes]
+        where.append(" OR ".join(["source_path LIKE ? ESCAPE '~'"] * len(bounded)))
+        # SQLite LIKE case-folds ASCII only. That's the desirable behaviour for Windows
+        # drive letters/extensions, but non-ASCII path segments still match case-sensitively.
+        params += [_like_prefix(p) for p in bounded]
+    if not kinds and not prefixes:
+        print("(no --kind or prefix given: refreshing the whole manifest)")
+    sql = "UPDATE files SET meta_read=0 WHERE " + " AND ".join(f"({w})" for w in where)
+    n = conn.execute(sql, params).rowcount
+    conn.commit()
+    print(f"{n} manifest rows marked for metadata refresh")
+    read_metadata_pending(conn, cfg)
+    print("refresh complete. Next: photoflow plan")
+
+
 def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
     if not exiftool_available():
         sys.exit("exiftool not found on PATH - install it first (see README).")
+    if getattr(args, "refresh_meta", False):
+        _refresh_meta(conn, args, cfg)
+        return
+    if not args.sources:
+        sys.exit("scan: give at least one source folder, or use --refresh-meta [PREFIX ...]")
     if not HAVE_IMAGEHASH:
         print(
             "NOTE: Pillow/ImageHash not installed - near-dupe flagging disabled, "
@@ -23,41 +90,86 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
         print("NOTE: pillow-heif not installed - HEIC files get exact dedupe only.")
 
     new_paths = []
+    pruned = unreadable = too_small = 0
+    # An exclude_dirs entry with a glob metacharacter is matched with fnmatch; a plain entry
+    # stays an exact (case-insensitive) name. Lightroom preview bundles carry the catalog name
+    # ("My Catalog Previews.lrdata"), so an exact "Previews.lrdata" never matched a real one.
+    excluded = {d.lower() for d in cfg.exclude_dirs if not _is_glob(d)}
+    exclude_globs = [d.lower() for d in cfg.exclude_dirs if _is_glob(d)]
+
+    def _walk_error(err: OSError) -> None:
+        nonlocal unreadable
+        unreadable += 1
+        print(f"  unreadable: {err}")
+
     for root in args.sources:
         root = Path(root).expanduser().resolve()
         if not root.exists():
             print(f"skipping missing source: {root}")
             continue
         print(f"scanning {root} ...")
-        for p in sorted(root.rglob("*")):
-            if not p.is_file() or p.name.startswith("."):
-                continue
-            ext = p.suffix.lower()
-            kind = classify(ext, cfg)
-            if kind == "other":
-                continue
-            sp = str(p)
-            existing = conn.execute(
-                "SELECT size, mtime FROM files WHERE source_path=?", (sp,)
-            ).fetchone()
-            st = p.stat()
-            if (
-                existing
-                and existing["size"] == st.st_size
-                and abs(existing["mtime"] - st.st_mtime) < 1
-            ):
-                continue  # already scanned, unchanged
-            conn.execute(
-                """INSERT INTO files(source_path, source_root, rel_path, size,
-                                     mtime, ext, kind)
-                   VALUES (?,?,?,?,?,?,?)
-                   ON CONFLICT(source_path) DO UPDATE SET
-                     size=excluded.size, mtime=excluded.mtime, status='scanned',
-                     content_hash=NULL, phash=NULL""",
-                (sp, str(root), str(p.relative_to(root)), st.st_size, st.st_mtime, ext, kind),
-            )
-            new_paths.append(sp)
+        for dirpath, dirnames, filenames in os.walk(root, onerror=_walk_error):
+            keep = []
+            for d in sorted(dirnames):
+                dl = d.lower()
+                if dl in excluded or any(fnmatch.fnmatchcase(dl, g) for g in exclude_globs):
+                    pruned += 1
+                    continue
+                keep.append(d)
+            dirnames[:] = keep  # in-place: this is what prunes the walk
+            for fn in sorted(filenames):
+                if fn.startswith("."):
+                    continue
+                ext = Path(fn).suffix.lower()
+                kind = classify(ext, cfg)
+                if kind == "other":
+                    continue
+                p = Path(dirpath) / fn
+                try:
+                    st = p.stat()
+                except OSError as e:
+                    unreadable += 1
+                    print(f"  unreadable: {e}")
+                    continue
+                # Sidecars are exempt: an .xmp/.aae/.thm is a few hundred bytes by nature, and
+                # a min_size_bytes tuned for thumbnail junk would silently strand them.
+                if kind != "sidecar" and st.st_size < cfg.min_size_bytes:
+                    too_small += 1
+                    continue
+                sp = str(p)
+                existing = conn.execute(
+                    "SELECT size, mtime, content_hash FROM files WHERE source_path=?", (sp,)
+                ).fetchone()
+                if (
+                    existing
+                    and existing["content_hash"] is not None
+                    and existing["size"] == st.st_size
+                    and abs(existing["mtime"] - st.st_mtime) < 1
+                ):
+                    continue  # already scanned AND fingerprinted, unchanged
+                conn.execute(
+                    """INSERT INTO files(source_path, source_root, rel_path, size,
+                                         mtime, ext, kind)
+                       VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(source_path) DO UPDATE SET
+                         size=excluded.size, mtime=excluded.mtime, status='scanned',
+                         content_hash=NULL, phash=NULL, meta_read=0,
+                         exif_date=NULL, camera=NULL, width=NULL, height=NULL""",
+                    (
+                        sp,
+                        str(root),
+                        str(p.relative_to(root)),
+                        st.st_size,
+                        st.st_mtime,
+                        ext,
+                        kind,
+                    ),
+                )
+                new_paths.append(sp)
     conn.commit()
+    print(
+        f"walk: pruned {pruned} dirs, skipped {unreadable} unreadable, {too_small} below min size"
+    )
     print(f"{len(new_paths)} new/changed files to fingerprint")
 
     # content hashes
@@ -75,23 +187,7 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
     conn.commit()
 
     # exif
-    print("reading metadata (exiftool)...")
-    meta = exiftool_json(new_paths, cfg.exiftool_batch)
-    for sp, rec in meta.items():
-        raw_date = (
-            rec.get("DateTimeOriginal") or rec.get("CreateDate") or rec.get("MediaCreateDate")
-        )
-        conn.execute(
-            "UPDATE files SET exif_date=?, camera=?, width=?, height=? WHERE source_path=?",
-            (
-                str(raw_date) if raw_date else None,
-                rec.get("Model"),
-                rec.get("ImageWidth"),
-                rec.get("ImageHeight"),
-                sp,
-            ),
-        )
-    conn.commit()
+    read_metadata_pending(conn, cfg)
 
     # perceptual hashes (images only)
     if HAVE_IMAGEHASH:
@@ -101,7 +197,87 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
         row = conn.execute("SELECT id FROM files WHERE source_path=?", (sp,)).fetchone()
         log_action(conn, log_fh, run_id, row["id"], "scanned", sp)
     conn.commit()
-    print("scan complete. Next: python photoflow.py plan")
+    print("scan complete. Next: photoflow plan")
+
+
+#: Capture-date tags in preference order. QuickTime CreationDate first: it is tz-aware and
+#: capture-local (iPhones write it), so it beats the UTC-converted CreateDate for video.
+DATE_TAGS = ("CreationDate", "DateTimeOriginal", "CreateDate", "MediaCreateDate")
+
+
+def _first_parseable_date(rec: dict, min_year: int = MIN_YEAR_DEFAULT) -> str | None:
+    """Pick the first DATE_TAGS value that actually parses, as the raw exiftool string.
+
+    Preference alone is not enough: wild files carry "0000:00:00 00:00:00" and similar junk,
+    and a garbage CreationDate must not shadow a good DateTimeOriginal. If nothing parses, the
+    first *present* value is returned anyway so plan's existing bad-date handling (and anyone
+    reading the manifest) still sees what the file claimed, rather than a silent NULL.
+
+    `min_year` is threaded through to `parse_exif_date` so a configured `photoflow.toml`
+    (e.g. `min_year = 1970`) picks the same tag `plan` would accept.
+    """
+    present = [str(rec[t]) for t in DATE_TAGS if rec.get(t)]
+    for v in present:
+        if parse_exif_date(v, min_year) is not None:
+            return v
+    return present[0] if present else None
+
+
+def read_metadata_pending(conn, cfg) -> int:
+    """Read exiftool metadata for every manifest row still flagged meta_read=0.
+
+    Manifest-driven for the same reasons as phash_pending_images: an IN(<paths>) clause
+    overflows SQLite's 32766-variable cap on large imports, and an interrupted scan resumes
+    here instead of losing the pass. exiftool emits a record (with SourceFile) even for a
+    tag-less file, so those are marked done per batch instead of being retried forever; a path
+    with no record at all is missing/offline and keeps whatever the manifest already knows.
+    """
+    rows = conn.execute(
+        "SELECT id, source_path, kind FROM files "
+        "WHERE content_hash IS NOT NULL AND meta_read=0 "
+        "AND status NOT IN ('error','skipped_manual')"
+    ).fetchall()
+    if not rows:
+        return 0
+    print(f"reading metadata (exiftool) for {len(rows)} files...")
+    done = 0
+    for i in range(0, len(rows), cfg.exiftool_batch):
+        batch = rows[i : i + cfg.exiftool_batch]
+        # -fast2 is a large win for JPEG/RAW but returns NOTHING for trailing-moov QuickTime,
+        # so video is read in a second, slower call.
+        video = [r["source_path"] for r in batch if r["kind"] == "video"]
+        other = [r["source_path"] for r in batch if r["kind"] != "video"]
+        meta_other = exiftool_json(other, cfg.exiftool_batch, fast=True)
+        meta_video = exiftool_json(video, cfg.exiftool_batch, fast=False)
+        for r in batch:
+            # Emptiness is judged per invocation, never across the two: the sub-batches are
+            # <= cfg.exiftool_batch (exiftool_json's own batch size) so each call is exactly
+            # one invocation, and a failed video call must not ride on a successful image one.
+            src = meta_video if r["kind"] == "video" else meta_other
+            rec = src.get(r["source_path"])
+            if rec is None:
+                # No record: the file is missing/offline, or the call failed. Never clobber
+                # what the manifest already knows. If this invocation returned records the
+                # path is individually unreadable -> mark it done rather than retry forever;
+                # if it returned nothing, leave meta_read=0 so a transient failure retries.
+                if src:
+                    conn.execute("UPDATE files SET meta_read=1 WHERE id=?", (r["id"],))
+                continue
+            raw_date = _first_parseable_date(rec, cfg.min_year)
+            conn.execute(
+                "UPDATE files SET exif_date=?, camera=?, width=?, height=?, meta_read=1 WHERE id=?",
+                (
+                    raw_date,
+                    rec.get("Model"),
+                    rec.get("ImageWidth"),
+                    rec.get("ImageHeight"),
+                    r["id"],
+                ),
+            )
+        conn.commit()
+        done += len(batch)
+        print(f"  metadata {done}/{len(rows)}")
+    return done
 
 
 def phash_pending_images(conn):

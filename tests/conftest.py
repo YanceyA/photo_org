@@ -1,8 +1,10 @@
 import random
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -115,3 +117,42 @@ def photo_fixture(tmp_path: Path) -> Path:
         _set_exif(p, DateTimeOriginal=f"2015:07:14 12:00:{i * 2:02d}", Model="Canon EOS 70D")
 
     return src
+
+
+_QT_EPOCH = datetime(1904, 1, 1, tzinfo=UTC)  # QuickTime/MP4 time origin
+
+
+def _box(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", len(payload) + 8) + kind + payload
+
+
+def make_minimal_mp4(path: Path, creation_dt: datetime) -> int:
+    """Write a 160-byte MP4 whose mvhd creation_time is `creation_dt` (must be tz-aware).
+
+    ftyp + a stub mdat + a TRAILING moov/mvhd - the layout real cameras and phones use, and
+    the reason -fast2 (which stops before the trailing moov) returns nothing for them.
+    Minimal enough for exiftool to read a CreateDate off it; not a playable file (no tracks,
+    no media data). No binary asset needed in the repo.
+    """
+    assert creation_dt.tzinfo is not None, "creation_dt must be tz-aware"
+    secs = int((creation_dt - _QT_EPOCH).total_seconds())
+    ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 512) + b"isomiso2mp41")
+    mdat = _box(b"mdat", b"\x00" * 8)
+    unity_matrix = struct.pack(">9i", 0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000)
+    mvhd = _box(
+        b"mvhd",
+        struct.pack(">I", 0)  # version 0 + 3 flag bytes
+        + struct.pack(">I", secs)  # creation_time
+        + struct.pack(">I", secs)  # modification_time
+        + struct.pack(">I", 1000)  # timescale
+        + struct.pack(">I", 0)  # duration
+        + struct.pack(">I", 0x00010000)  # rate 1.0
+        + struct.pack(">H", 0x0100)  # volume 1.0
+        + b"\x00" * 10  # reserved
+        + unity_matrix
+        + b"\x00" * 24  # pre_defined
+        + struct.pack(">I", 2),  # next_track_id
+    )
+    data = ftyp + mdat + _box(b"moov", mvhd)
+    path.write_bytes(data)
+    return len(data)

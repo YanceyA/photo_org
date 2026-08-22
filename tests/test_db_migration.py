@@ -27,3 +27,32 @@ def test_open_db_adds_ignored_column_to_legacy_faces(tmp_path):
     # idempotent: opening again must not error or duplicate the column
     conn.close()
     open_db(tmp_path)
+
+
+def test_open_db_adds_meta_read_column_to_legacy_files(tmp_path):
+    # A DB created before files.meta_read existed. CREATE TABLE IF NOT EXISTS won't add the
+    # column, so open_db must ALTER it in. A legacy row that already has a content_hash went
+    # through the old inline exiftool pass, so the migration marks it read (1); a row without
+    # one is an interrupted scan and stays 0 for the resumable passes to finish.
+    db = tmp_path / "photoflow.db"
+    raw = sqlite3.connect(db)
+    raw.executescript(
+        "CREATE TABLE files (id INTEGER PRIMARY KEY, source_path TEXT UNIQUE NOT NULL,"
+        " content_hash TEXT, status TEXT DEFAULT 'scanned');"
+        "INSERT INTO files(source_path, content_hash) VALUES ('C:/x/hashed.jpg', 'abc123');"
+        "INSERT INTO files(source_path) VALUES ('C:/x/unhashed.jpg');"
+    )
+    raw.commit()
+    raw.close()
+
+    conn = open_db(tmp_path)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
+    assert "meta_read" in cols
+    got = {
+        r["source_path"]: r["meta_read"]
+        for r in conn.execute("SELECT source_path, meta_read FROM files")
+    }
+    assert got == {"C:/x/hashed.jpg": 1, "C:/x/unhashed.jpg": 0}
+
+    conn.close()
+    open_db(tmp_path)  # idempotent

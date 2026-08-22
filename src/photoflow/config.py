@@ -12,6 +12,8 @@ from pathlib import Path
 MAX_YEAR = datetime.now().year + 1
 
 _EXT_FIELDS = frozenset({"image_ext", "raw_ext", "video_ext", "sidecar_ext"})
+# every field whose TOML value is a list but whose dataclass type is frozenset[str]
+_FROZENSET_FIELDS = _EXT_FIELDS | {"exclude_dirs"}
 
 
 @dataclass(frozen=True)
@@ -25,12 +27,66 @@ class Config:
         {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
     )
     raw_ext: frozenset[str] = frozenset(
-        {".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".raf", ".pef", ".srw", ".x3f"}
+        {
+            ".cr2",
+            ".cr3",
+            ".crw",
+            ".nef",
+            ".nrw",
+            ".arw",
+            ".sr2",
+            ".srf",
+            ".dng",
+            ".orf",
+            ".rw2",
+            ".raf",
+            ".pef",
+            ".srw",
+            ".x3f",
+            ".iiq",
+            ".3fr",
+            ".eip",
+            ".erf",
+            ".mrw",
+            ".rwl",
+            ".mef",
+            ".kdc",
+            ".dcr",
+        }
     )
     video_ext: frozenset[str] = frozenset(
         {".mov", ".mp4", ".m4v", ".avi", ".mts", ".m2ts", ".3gp", ".wmv", ".mpg", ".mpeg"}
     )
     sidecar_ext: frozenset[str] = frozenset({".xmp", ".aae", ".thm"})
+    # Directory names never descended into, matched case-insensitively against each path
+    # component BELOW the source root (the root itself is always scanned, even if its own
+    # name is listed). Caches, proxies, previews and recycle bins - ingesting them fills the
+    # library with derivatives of files it already has.
+    # An entry containing '*' or '?' is a glob (fnmatch), matched case-insensitively against
+    # the whole directory name; everything else is an exact name. Lightroom preview bundles are
+    # named "<Catalog Name> Previews.lrdata", so only a glob catches them.
+    exclude_dirs: frozenset[str] = frozenset(
+        {
+            "CaptureOne",
+            "Cache",
+            "Proxies",
+            "Thumbnails",
+            "Trash",
+            "$RECYCLE.BIN",
+            "System Volume Information",
+            "@eaDir",
+            ".thumbnails",
+            ".Trash",
+            ".Trashes",
+            "*.lrdata",  # "<Catalog> Previews.lrdata", "<Catalog> Smart Previews.lrdata", ...
+            "Lightroom Settings",
+            "__MACOSX",
+        }
+    )
+    # Files smaller than this are skipped at walk time. 0 = off (default). 20000 is a
+    # sensible value for sources littered with camera/app thumbnails. Sidecars are exempt -
+    # they're tiny by nature, and dropping them would strand the media they describe.
+    min_size_bytes: int = 0
 
     # --- enrich subsystem (all optional; defaults give a working CPU-faces / RAM-tags run) ---
     # auto = prefer RAM++ but fall back to CLIP/SigLIP if it can't load. RAM++ needs an old
@@ -93,6 +149,6 @@ def load_config(workdir: Path) -> Config:
     for k in data:
         if k not in valid:
             sys.exit(f"photoflow.toml: unknown key '{k}' (valid: {', '.join(sorted(valid))})")
-    for k in _EXT_FIELDS & data.keys():
+    for k in _FROZENSET_FIELDS & data.keys():
         data[k] = frozenset(data[k])
     return Config(**data)

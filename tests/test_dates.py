@@ -110,3 +110,10 @@ class TestResolveDate:
     def test_bogus_mtime_rejected(self):
         ts = (datetime.now() + timedelta(days=365 * 3)).timestamp()
         assert resolve_date(_row(mtime=ts)) == (None, "none", "none")
+
+
+def test_parse_exif_date_ignores_a_trailing_timezone_offset():
+    # exiftool -api QuickTimeUTC=1 returns tz-aware strings for QuickTime dates. The library
+    # stores wall-clock local time, so the offset is deliberately discarded.
+    assert parse_exif_date("2010:09:04 04:03:31+12:00") == datetime(2010, 9, 4, 4, 3, 31)
+    assert parse_exif_date("2010:09:03 16:03:31-05:00") == datetime(2010, 9, 3, 16, 3, 31)

@@ -56,3 +56,55 @@ def test_unknown_key_rejected(tmp_path: Path):
     (tmp_path / "photoflow.toml").write_text("near_dup_threshold = 8\n", encoding="utf-8")
     with pytest.raises(SystemExit):
         load_config(tmp_path)  # typo'd key must not be silently ignored
+
+
+def test_source_hygiene_defaults():
+    c = Config()
+    # H4: RAW extensions that were silently dropped (744 Canon .crw in the owner's sources)
+    for ext in (
+        ".crw",
+        ".iiq",
+        ".eip",
+        ".erf",
+        ".mrw",
+        ".sr2",
+        ".srf",
+        ".nrw",
+        ".rwl",
+        ".mef",
+        ".kdc",
+        ".dcr",
+        ".3fr",
+    ):
+        assert ext in c.raw_ext, ext
+    assert ".cr2" in c.raw_ext  # pre-existing entries survive
+    # H6: junk trees that must never be descended into
+    for d in (
+        "CaptureOne",
+        "Cache",
+        "Proxies",
+        "Thumbnails",
+        "Trash",
+        "$RECYCLE.BIN",
+        "System Volume Information",
+        "@eaDir",
+        ".thumbnails",
+        ".Trash",
+        ".Trashes",
+        "*.lrdata",  # glob: real bundles are "<Catalog> Previews.lrdata"
+        "Lightroom Settings",
+        "__MACOSX",
+    ):
+        assert d in c.exclude_dirs, d
+    assert isinstance(c.exclude_dirs, frozenset)
+    # opt-in; 20000 is the documented value for thumbnail-laden sources
+    assert c.min_size_bytes == 0
+
+
+def test_exclude_dirs_and_min_size_from_toml(tmp_path: Path):
+    (tmp_path / "photoflow.toml").write_text(
+        'exclude_dirs = ["Output", "Selects"]\nmin_size_bytes = 20000\n', encoding="utf-8"
+    )
+    c = load_config(tmp_path)
+    assert c.exclude_dirs == frozenset({"Output", "Selects"})  # list -> frozenset like the ext sets
+    assert c.min_size_bytes == 20000

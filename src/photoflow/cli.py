@@ -16,6 +16,7 @@ from photoflow.enrich.review import cmd_enrich_review
 from photoflow.enrich.scan import cmd_enrich_scan
 from photoflow.enrich.status import cmd_enrich_status
 from photoflow.planner import cmd_plan
+from photoflow.refile import cmd_refile
 from photoflow.review import cmd_review
 from photoflow.scan import cmd_scan
 from photoflow.status import cmd_status
@@ -39,7 +40,25 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("scan", help="fingerprint source folders into the manifest")
-    p.add_argument("sources", nargs="+")
+    p.add_argument(
+        "sources",
+        nargs="*",
+        help="source folders to scan (with --refresh-meta: path prefixes to limit the refresh)",
+    )
+    p.add_argument(
+        "--refresh-meta",
+        action="store_true",
+        help=(
+            "re-read exiftool metadata for rows already in the manifest (no re-hash, no copy); "
+            "rows in error/skipped_manual are left alone"
+        ),
+    )
+    p.add_argument(
+        "--kind",
+        action="append",
+        choices=["image", "raw", "video", "sidecar"],
+        help="with --refresh-meta: limit to this kind (repeatable)",
+    )
 
     sub.add_parser("plan", help="resolve dates, group dupes, queue reviews")
     sub.add_parser("review", help="export review.html + decisions.csv")
@@ -47,6 +66,16 @@ def main():
     p = sub.add_parser("apply", help="copy keepers into the organized library")
     p.add_argument("--out", required=True, help="output library root")
     p.add_argument("--decisions", help="decisions CSV (default workdir/decisions.csv)")
+    p.add_argument("--dry-run", action="store_true")
+
+    p = sub.add_parser(
+        "refile",
+        help=(
+            "move already-copied library files to the dest their current date implies "
+            "(rescan your external library, e.g. Immich, afterwards)"
+        ),
+    )
+    p.add_argument("--out", required=True, help="output library root (same as apply --out)")
     p.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("status", help="manifest summary")
@@ -84,6 +113,7 @@ def main():
             "plan": cmd_plan,
             "review": cmd_review,
             "apply": cmd_apply,
+            "refile": cmd_refile,
             "status": cmd_status,
         }[args.cmd]
 
