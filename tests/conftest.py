@@ -127,12 +127,14 @@ def _box(kind: bytes, payload: bytes) -> bytes:
 
 
 def make_minimal_mp4(path: Path, creation_dt: datetime) -> int:
-    """Write a valid 160-byte MP4 whose mvhd creation_time is `creation_dt` (must be tz-aware).
+    """Write a 160-byte MP4 whose mvhd creation_time is `creation_dt` (must be tz-aware).
 
     ftyp + a stub mdat + a TRAILING moov/mvhd - the layout real cameras and phones use, and
     the reason -fast2 (which stops before the trailing moov) returns nothing for them.
-    No binary asset needed; exiftool reads this as CreateDate.
+    Minimal enough for exiftool to read a CreateDate off it; not a playable file (no tracks,
+    no media data). No binary asset needed in the repo.
     """
+    assert creation_dt.tzinfo is not None, "creation_dt must be tz-aware"
     secs = int((creation_dt - _QT_EPOCH).total_seconds())
     ftyp = _box(b"ftyp", b"isom" + struct.pack(">I", 512) + b"isomiso2mp41")
     mdat = _box(b"mdat", b"\x00" * 8)

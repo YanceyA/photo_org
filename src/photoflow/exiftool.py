@@ -11,8 +11,10 @@ import tempfile
 from pathlib import Path
 
 EXIF_TAGS = [
-    # QuickTime Keys:CreationDate - tz-aware, written by iPhones, preferred for video
-    "-CreationDate",
+    # QuickTime Keys:CreationDate - tz-aware, written by iPhones, preferred for video.
+    # Group-scoped on purpose: bare -CreationDate also matches XMP-pdf:CreationDate, which
+    # would outrank DateTimeOriginal on a PDF-derived JPEG. -j still keys it "CreationDate".
+    "-QuickTime:CreationDate",
     "-DateTimeOriginal",
     "-CreateDate",
     "-MediaCreateDate",
@@ -35,7 +37,12 @@ def exiftool_json(paths: list[str], batch_size: int = 200, *, fast: bool = True)
     trailing-moov MP4 with -fast2 and CreateDate without it).
 
     -api QuickTimeUTC=1 is always on: QuickTime dates are UTC by spec, and without this the
-    library files a midnight clip under the wrong day (12-13 h off in NZ).
+    library files a midnight clip under the wrong day (12-13 h off in NZ). Note it converts
+    CreateDate/MediaCreateDate to THIS machine's local zone at scan time, so the day a clip is
+    filed under depends on where it was scanned; the tz-aware QuickTime CreationDate (preferred
+    when present) is capture-local and passes through unconverted. The tradeoff: devices that
+    write local time into mvhd despite the spec (some Android phones, GoPros, camcorders) come
+    out shifted by the local offset - still a net win across the library, but a known one.
     """
     out: dict[str, dict] = {}
     for i in range(0, len(paths), batch_size):

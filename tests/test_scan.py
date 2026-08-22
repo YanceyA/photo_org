@@ -297,3 +297,57 @@ def test_failed_video_subcall_does_not_mark_video_rows_done(tmp_path: Path, monk
     assert state["image"] == 1, "the image sub-call worked: that path is individually unreadable"
     assert state["video"] == 0, "the video sub-call failed: retry it next run"
     conn.close()
+
+
+@pytest.mark.parametrize(
+    "rec, expect",
+    [
+        # a garbage CreationDate must not shadow a good DateTimeOriginal (wild EXIF really
+        # does contain "0000:00:00 00:00:00" - CLAUDE.md calls it out)
+        (
+            {
+                "CreationDate": "0000:00:00 00:00:00",
+                "DateTimeOriginal": "2015:07:14 10:30:00",
+                "CreateDate": "2015:07:14 10:30:01",
+            },
+            "2015:07:14 10:30:00",
+        ),
+        # fallback chain with CreationDate absent
+        (
+            {
+                "DateTimeOriginal": "2015:07:14 10:30:00",
+                "CreateDate": "2016:01:01 00:00:00",
+                "MediaCreateDate": "2017:01:01 00:00:00",
+            },
+            "2015:07:14 10:30:00",
+        ),
+        (
+            {"CreateDate": "2016:01:01 00:00:00", "MediaCreateDate": "2017:01:01 00:00:00"},
+            "2016:01:01 00:00:00",
+        ),
+        ({"MediaCreateDate": "2017:01:01 00:00:00"}, "2017:01:01 00:00:00"),
+        # nothing parses -> keep the first value the file claimed, so plan still sees it
+        ({"CreationDate": "0000:00:00 00:00:00"}, "0000:00:00 00:00:00"),
+        ({"Model": "Canon EOS 70D"}, None),
+    ],
+)
+def test_read_metadata_pending_stores_the_first_parseable_date(
+    tmp_path: Path, monkeypatch, rec, expect
+):
+    import photoflow.scan as scan_mod
+    from photoflow.config import Config
+
+    conn = open_db(tmp_path / "work")
+    conn.execute(
+        "INSERT INTO files(source_path, kind, status, content_hash, meta_read) VALUES (?,?,?,?,0)",
+        (str(tmp_path / "x.jpg"), "image", "scanned", "1234abcd" * 8),
+    )
+    conn.commit()
+
+    monkeypatch.setattr(
+        scan_mod, "exiftool_json", lambda paths, batch, **kw: {p: rec for p in paths}
+    )
+    scan_mod.read_metadata_pending(conn, Config())
+
+    assert conn.execute("SELECT exif_date FROM files").fetchone()[0] == expect
+    conn.close()

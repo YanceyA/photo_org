@@ -5,16 +5,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from conftest import make_minimal_mp4
+from conftest import _gradient, _set_exif, make_minimal_mp4
 
 from photoflow.exiftool import EXIF_TAGS, exiftool_json
 
 UTC_CREATION = datetime(2010, 9, 3, 16, 3, 31, tzinfo=UTC)
 
 
-def test_creation_date_tag_is_requested():
+def test_creation_date_tag_is_requested_scoped_to_quicktime():
     # QuickTime Keys:CreationDate is what iPhones write, and it carries a real tz offset.
-    assert "-CreationDate" in EXIF_TAGS
+    # It must stay group-scoped: bare -CreationDate also matches XMP-pdf:CreationDate, which
+    # would then outrank DateTimeOriginal on a JPEG exported from a PDF.
+    assert "-QuickTime:CreationDate" in EXIF_TAGS
+    assert "-CreationDate" not in EXIF_TAGS
 
 
 @pytest.mark.exiftool
@@ -30,6 +33,25 @@ def test_fast_mode_misses_the_trailing_moov_and_slow_mode_finds_it(tmp_path: Pat
     # the expectation rather than hard-coding an offset.
     expect = UTC_CREATION.astimezone().strftime("%Y:%m:%d %H:%M:%S")
     assert str(slow[str(clip)]["CreateDate"]).startswith(expect)
+
+
+@pytest.mark.exiftool
+def test_pdf_creation_date_on_a_jpeg_is_not_picked_up(tmp_path: Path):
+    # Bare -CreationDate matches XMP-pdf:CreationDate too, which would beat DateTimeOriginal
+    # on a JPEG exported from a PDF. The QuickTime-scoped tag must not see it.
+    jpg = tmp_path / "from_pdf.jpg"
+    _gradient(64, 64, seed=9).save(jpg, "JPEG", quality=90)
+    _set_exif(
+        jpg,
+        **{
+            "XMP-pdf:CreationDate": "2001:02:03 04:05:06",
+            "DateTimeOriginal": "2015:07:14 10:30:00",
+        },
+    )
+
+    rec = exiftool_json([str(jpg)], 200, fast=True)[str(jpg)]
+    assert "CreationDate" not in rec
+    assert rec["DateTimeOriginal"] == "2015:07:14 10:30:00"
 
 
 def test_argfile_omits_fast2_when_fast_is_false_and_always_sets_quicktimeutc(monkeypatch):
@@ -50,4 +72,4 @@ def test_argfile_omits_fast2_when_fast_is_false_and_always_sets_quicktimeutc(mon
     assert "-fast2\n" in image_args
     for args in (video_args, image_args):
         assert "-api\nQuickTimeUTC=1\n" in args
-        assert "-CreationDate\n" in args
+        assert "-QuickTime:CreationDate\n" in args

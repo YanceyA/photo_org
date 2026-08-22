@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from photoflow.audit import log_action
+from photoflow.dates import parse_exif_date
 from photoflow.exiftool import exiftool_available, exiftool_json
 from photoflow.hashing import HAVE_HEIF, HAVE_IMAGEHASH, content_hash, perceptual_hash
 from photoflow.models import classify
@@ -127,6 +128,26 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
     print("scan complete. Next: photoflow plan")
 
 
+#: Capture-date tags in preference order. QuickTime CreationDate first: it is tz-aware and
+#: capture-local (iPhones write it), so it beats the UTC-converted CreateDate for video.
+DATE_TAGS = ("CreationDate", "DateTimeOriginal", "CreateDate", "MediaCreateDate")
+
+
+def _first_parseable_date(rec: dict) -> str | None:
+    """Pick the first DATE_TAGS value that actually parses, as the raw exiftool string.
+
+    Preference alone is not enough: wild files carry "0000:00:00 00:00:00" and similar junk,
+    and a garbage CreationDate must not shadow a good DateTimeOriginal. If nothing parses, the
+    first *present* value is returned anyway so plan's existing bad-date handling (and anyone
+    reading the manifest) still sees what the file claimed, rather than a silent NULL.
+    """
+    present = [str(rec[t]) for t in DATE_TAGS if rec.get(t) is not None]
+    for v in present:
+        if parse_exif_date(v) is not None:
+            return v
+    return present[0] if present else None
+
+
 def read_metadata_pending(conn, cfg) -> int:
     """Read exiftool metadata for every manifest row still flagged meta_read=0.
 
@@ -153,32 +174,25 @@ def read_metadata_pending(conn, cfg) -> int:
         other = [r["source_path"] for r in batch if r["kind"] != "video"]
         meta_other = exiftool_json(other, cfg.exiftool_batch, fast=True)
         meta_video = exiftool_json(video, cfg.exiftool_batch, fast=False)
-        meta = {**meta_other, **meta_video}
         for r in batch:
-            rec = meta.get(r["source_path"])
+            # Emptiness is judged per invocation, never across the two: the sub-batches are
+            # <= cfg.exiftool_batch (exiftool_json's own batch size) so each call is exactly
+            # one invocation, and a failed video call must not ride on a successful image one.
+            src = meta_video if r["kind"] == "video" else meta_other
+            rec = src.get(r["source_path"])
             if rec is None:
-                # exiftool emitted no record: the file is missing/offline or the whole batch
-                # failed. Never clobber what the manifest already knows. If the batch as a
-                # whole came back non-empty this path is individually unreadable -> mark it
-                # done so it isn't retried forever; if the batch is entirely empty, leave
-                # meta_read=0 so a transient exiftool failure is retried next run.
-                # The non-empty test is per exiftool invocation, not on the merged dict: these
-                # sub-batches are <= cfg.exiftool_batch, which is exiftool_json's own batch
-                # size, so each sub-call is exactly one invocation and a failed video call
-                # next to a successful image call must not mark the video rows done.
-                if bool(meta_video) if r["kind"] == "video" else bool(meta_other):
+                # No record: the file is missing/offline, or the call failed. Never clobber
+                # what the manifest already knows. If this invocation returned records the
+                # path is individually unreadable -> mark it done rather than retry forever;
+                # if it returned nothing, leave meta_read=0 so a transient failure retries.
+                if src:
                     conn.execute("UPDATE files SET meta_read=1 WHERE id=?", (r["id"],))
                 continue
-            raw_date = (
-                rec.get("CreationDate")
-                or rec.get("DateTimeOriginal")
-                or rec.get("CreateDate")
-                or rec.get("MediaCreateDate")
-            )
+            raw_date = _first_parseable_date(rec)
             conn.execute(
                 "UPDATE files SET exif_date=?, camera=?, width=?, height=?, meta_read=1 WHERE id=?",
                 (
-                    str(raw_date) if raw_date else None,
+                    raw_date,
                     rec.get("Model"),
                     rec.get("ImageWidth"),
                     rec.get("ImageHeight"),
