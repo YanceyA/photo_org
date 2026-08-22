@@ -16,6 +16,7 @@ from photoflow.enrich.review import cmd_enrich_review
 from photoflow.enrich.scan import cmd_enrich_scan
 from photoflow.enrich.status import cmd_enrich_status
 from photoflow.planner import cmd_plan
+from photoflow.prune import cmd_prune_sidecars
 from photoflow.review import cmd_review
 from photoflow.scan import cmd_scan
 from photoflow.status import cmd_status
@@ -47,6 +48,12 @@ def main():
     p = sub.add_parser("apply", help="copy keepers into the organized library")
     p.add_argument("--out", required=True, help="output library root")
     p.add_argument("--decisions", help="decisions CSV (default workdir/decisions.csv)")
+    p.add_argument("--dry-run", action="store_true")
+
+    p = sub.add_parser(
+        "prune-sidecars", help="move already-copied sidecar files out of the library"
+    )
+    p.add_argument("--out", required=True, help="output library root")
     p.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("status", help="manifest summary")
@@ -84,6 +91,7 @@ def main():
             "plan": cmd_plan,
             "review": cmd_review,
             "apply": cmd_apply,
+            "prune-sidecars": cmd_prune_sidecars,
             "status": cmd_status,
         }[args.cmd]
 
