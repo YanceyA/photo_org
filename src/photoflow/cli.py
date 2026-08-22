@@ -16,6 +16,7 @@ from photoflow.enrich.review import cmd_enrich_review
 from photoflow.enrich.scan import cmd_enrich_scan
 from photoflow.enrich.status import cmd_enrich_status
 from photoflow.planner import cmd_plan
+from photoflow.refile import cmd_refile
 from photoflow.review import cmd_review
 from photoflow.scan import cmd_scan
 from photoflow.status import cmd_status
@@ -67,6 +68,16 @@ def main():
     p.add_argument("--decisions", help="decisions CSV (default workdir/decisions.csv)")
     p.add_argument("--dry-run", action="store_true")
 
+    p = sub.add_parser(
+        "refile",
+        help=(
+            "move already-copied library files to the dest their current date implies "
+            "(rescan your external library, e.g. Immich, afterwards)"
+        ),
+    )
+    p.add_argument("--out", required=True, help="output library root (same as apply --out)")
+    p.add_argument("--dry-run", action="store_true")
+
     sub.add_parser("status", help="manifest summary")
 
     # enrich: faces + content tags written into the organized library as portable XMP
@@ -102,6 +113,7 @@ def main():
             "plan": cmd_plan,
             "review": cmd_review,
             "apply": cmd_apply,
+            "refile": cmd_refile,
             "status": cmd_status,
         }[args.cmd]
 
