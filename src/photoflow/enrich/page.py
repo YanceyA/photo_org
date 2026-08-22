@@ -114,6 +114,11 @@ def blacklist_rows(tags: list[str]) -> list[dict]:
 
     Re-emitted from the DB on every review so the decision carries forward: the page seeds
     its Set from them, and apply drops the tag everywhere.
+
+    Caveat on the reverse direction: `enrich scan` skips a blacklisted tag at INSERT time, so
+    un-blacklisting is not retroactive. It only affects (a) future scans and (b) files that
+    still hold a `tags` row for the tag because they were scanned before it was blacklisted.
+    Everything scanned while it was blacklisted needs a re-scan of those files to get it back.
     """
     return [
         {
@@ -546,9 +551,17 @@ function updateProgress(){ let named=0, dism=0; for(const c of PEOPLE.clusters){
   document.getElementById("people-progress").textContent="named "+named+" · ignored "+dism+" / "+PEOPLE.clusters.length+" clusters"; }
 
 // ---------------- Tags ----------------
+// A blacklisted tag is filtered out of BOTH payload sides upstream (review.py drops it from
+// tag_items and auto_items), so autoSummary alone gives it no chip - and with no chip there is
+// no way to click it off again, which made un-blacklisting unreachable from the page. Render an
+// extra chip for every blacklist entry autoSummary doesn't cover; same handler, so clicking it
+// removes it from the Set and leaves the blacklistRemoved tombstone apply reads.
+function autoSummaryChips(){
+  const seen=new Set(TAGS.autoSummary.map(s=>s.tag));
+  return TAGS.autoSummary.concat([...blacklist].filter(t=>!seen.has(t)).sort().map(t=>({tag:t,count:0,blOnly:true}))); }
 function renderAutoSummary(){
-  document.getElementById("autosummary").innerHTML=TAGS.autoSummary.map(s=>
-    '<span class="chip'+(blacklist.has(s.tag)?" bl":"")+'" data-tag="'+esc(s.tag)+'">'+esc(s.tag)+' ('+s.count+')</span>').join(""); }
+  document.getElementById("autosummary").innerHTML=autoSummaryChips().map(s=>
+    '<span class="chip'+(blacklist.has(s.tag)?" bl":"")+'"'+(s.blOnly?' data-blonly="1" title="blacklisted - click to un-blacklist"':"")+' data-tag="'+esc(s.tag)+'">'+esc(s.tag)+' ('+(s.blOnly?"blacklisted":s.count)+')</span>').join(""); }
 function tagPhotoHtml(p,tag){ const d=tagState[p.file_id+"|"+tag]||"";
   return '<div class="tp'+(d==="keep"?" keep":"")+'" data-fid="'+p.file_id+'">'
     +(p.thumb?'<img loading="lazy" decoding="async" src="'+esc(p.thumb)+'">':'<div class="s" style="height:84px;line-height:84px">no img</div>')
@@ -656,6 +669,9 @@ document.getElementById("autosummary").addEventListener("click",e=>{
   if(blacklist.has(tag)){ blacklist.delete(tag); blacklistAdded.delete(tag); blacklistRemoved.add(tag); }
   else { blacklist.add(tag); blacklistRemoved.delete(tag); blacklistAdded.add(tag); }
   dirty.tags=true; persist(); chip.classList.toggle("bl",blacklist.has(tag));
+  // a blacklist-only chip has no auto count to show; keep its label honest and keep the chip in
+  // the DOM (renderAutoSummary is not re-run) so the click is undoable within the session
+  if(chip.dataset.blonly) chip.textContent=tag+(blacklist.has(tag)?" (blacklisted)":" (0)");
   for(const el of document.querySelectorAll("#reviewtags .tag")) if(el.dataset.tag===tag){ const n=el.querySelector(".blnote"); if(n) n.textContent=blacklist.has(tag)?"blacklisted":""; break; }
   mark("tags");
 });
