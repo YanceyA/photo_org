@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 EXIF_TAGS = [
@@ -60,18 +60,45 @@ def exiftool_json(paths: list[str], batch_size: int = 200) -> dict[str, dict]:
     return out
 
 
-def read_keywords(paths: list[str], batch_size: int = 200) -> dict[str, set[str]]:
-    """Read existing XMP dc:Subject + IPTC:Keywords for each path, as a set per path.
+@dataclass
+class KeywordSets:
+    """What a library file already carries in the lists enrich apply rewrites.
+
+    `subject` merges dc:Subject and IPTC:Keywords (photoflow always writes them in step);
+    `hierarchical` and `persons` are kept separate because only OUR entries in them may be
+    replaced - a Places|Paris hierarchy or a PersonInImage written in digiKam must survive.
+    """
+
+    subject: set[str] = field(default_factory=set)
+    hierarchical: set[str] = field(default_factory=set)
+    persons: set[str] = field(default_factory=set)
+
+
+def _tag_set(value) -> set[str]:
+    """exiftool returns a scalar for a one-item list and omits absent tags entirely."""
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list):
+        return {str(x) for x in value}
+    return set()
+
+
+def read_keywords(paths: list[str], batch_size: int = 200) -> dict[str, KeywordSets]:
+    """Read the existing keyword-ish lists for each path.
 
     Used by enrich apply to union new tags/people with what's already on the file (the
     provenance folder keywords apply wrote, plus any user edits) so the write is a superset
-    and re-applying is idempotent. Missing tags are simply absent (exiftool omits them).
+    and re-applying is idempotent. A path MISSING from the returned dict means the read
+    failed - callers must skip it, never treat it as "no keywords" (R1).
     """
-    out: dict[str, set[str]] = {}
+    out: dict[str, KeywordSets] = {}
     for i in range(0, len(paths), batch_size):
         batch = paths[i : i + batch_size]
         with tempfile.NamedTemporaryFile("w", suffix=".args", delete=False, encoding="utf-8") as af:
-            af.write("-j\n-charset\nfilename=utf8\n-XMP-dc:Subject\n-IPTC:Keywords\n")
+            af.write(
+                "-j\n-charset\nfilename=utf8\n-XMP-dc:Subject\n-IPTC:Keywords\n"
+                "-XMP-lr:HierarchicalSubject\n-XMP-iptcExt:PersonInImage\n"
+            )
             for p in batch:
                 af.write(p + "\n")
             argfile = af.name
@@ -86,14 +113,11 @@ def read_keywords(paths: list[str], batch_size: int = 200) -> dict[str, set[str]
             if res.stdout.strip():
                 for rec in json.loads(res.stdout):
                     key = str(Path(rec.get("SourceFile", "")))
-                    kws: set[str] = set()
-                    for field in ("Subject", "Keywords"):
-                        v = rec.get(field)
-                        if isinstance(v, str):
-                            kws.add(v)
-                        elif isinstance(v, list):
-                            kws.update(str(x) for x in v)
-                    out[key] = kws
+                    out[key] = KeywordSets(
+                        subject=_tag_set(rec.get("Subject")) | _tag_set(rec.get("Keywords")),
+                        hierarchical=_tag_set(rec.get("HierarchicalSubject")),
+                        persons=_tag_set(rec.get("PersonInImage")),
+                    )
         except (json.JSONDecodeError, OSError) as e:
             print(f"  exiftool keyword read failed: {e}", file=sys.stderr)
         finally:

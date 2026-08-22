@@ -743,6 +743,44 @@ def test_apply_preserves_library_mtime(tmp_path):
     assert os.stat(dest).st_mtime == pytest.approx(before, abs=2)
 
 
+@pytest.mark.exiftool
+def test_apply_preserves_foreign_hierarchy_and_person(tmp_path):
+    # H11 end-to-end: values another tool wrote survive an apply.
+    import json
+    import subprocess
+
+    conn, workdir, lib, ids = _one_face_file(tmp_path, person="Yancey")
+    dest = conn.execute("SELECT dest_path FROM files").fetchone()["dest_path"]
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-XMP-lr:HierarchicalSubject=Places|Paris",
+            "-XMP-iptcExt:PersonInImage=Grandma",
+            dest,
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    out = subprocess.run(
+        ["exiftool", "-j", "-XMP-lr:HierarchicalSubject", "-XMP-iptcExt:PersonInImage", dest],
+        capture_output=True,
+        text=True,
+    )
+    rec = json.loads(out.stdout)[0]
+
+    def as_list(v):
+        return [v] if isinstance(v, str) else (v or [])
+
+    hier = as_list(rec.get("HierarchicalSubject"))
+    persons = as_list(rec.get("PersonInImage"))
+    assert "Places|Paris" in hier and "People|Yancey" in hier
+    assert "Grandma" in persons and "Yancey" in persons
+
+
 # ----------------------------------------------------- assign (centroid label propagation)
 
 

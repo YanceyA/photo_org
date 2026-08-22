@@ -8,6 +8,7 @@ from photoflow.enrich.regions import (
     normalized_region,
     region_argfile_lines,
 )
+from photoflow.exiftool import KeywordSets
 
 
 def test_normalized_region_center_and_size():
@@ -107,3 +108,63 @@ def test_keyword_argfile_lines_iptc_toggle():
     assert not any(ln.startswith("-IPTC:Keywords") for ln in no_iptc)
     with_iptc = keyword_argfile_lines(existing=set(), tags={"beach"}, people=set(), iptc=True)
     assert "-IPTC:Keywords=beach" in with_iptc
+
+
+def test_keyword_lines_keep_foreign_hierarchy_and_replace_only_our_branch():
+    # H11: a Places|Paris hierarchy added in digiKam must survive; only the People| branch
+    # is ours to rewrite.
+    existing = KeywordSets(
+        subject={"Holiday"},
+        hierarchical={"Places|Paris", "People|Stale"},
+        persons=set(),
+    )
+    lines = keyword_argfile_lines(existing, tags=set(), people={"Mum"}, prefix="People")
+    hier = [
+        ln.split("=", 1)[1]
+        for ln in lines
+        if ln.startswith("-XMP-lr:HierarchicalSubject=") and ln != "-XMP-lr:HierarchicalSubject="
+    ]
+    assert "Places|Paris" in hier  # foreign hierarchy preserved
+    assert "People|Mum" in hier  # our branch rewritten
+    assert "People|Stale" not in hier  # our branch REPLACED, not unioned
+    assert lines.count("-XMP-lr:HierarchicalSubject=") == 1  # cleared exactly once
+
+
+def test_keyword_lines_keep_foreign_person_and_drop_our_renamed_one():
+    existing = KeywordSets(subject=set(), hierarchical=set(), persons={"Grandma", "Old Name"})
+    lines = keyword_argfile_lines(
+        existing, tags=set(), people={"Mum"}, owned_people={"Mum", "Old Name"}
+    )
+    persons = [
+        ln.split("=", 1)[1]
+        for ln in lines
+        if ln.startswith("-XMP-iptcExt:PersonInImage=") and ln != "-XMP-iptcExt:PersonInImage="
+    ]
+    assert "Grandma" in persons  # foreign name preserved (photoflow doesn't know it)
+    assert "Mum" in persons
+    assert "Old Name" not in persons  # a name photoflow OWNS but no longer assigns is dropped
+
+
+def test_keyword_lines_leave_people_lists_alone_when_there_are_no_people():
+    # A tags-only file must not touch PersonInImage/HierarchicalSubject at all.
+    existing = KeywordSets(subject=set(), hierarchical={"Places|Paris"}, persons={"Grandma"})
+    lines = keyword_argfile_lines(existing, tags={"beach"}, people=set(), owned_people={"Mum"})
+    assert not any("HierarchicalSubject" in ln for ln in lines)
+    assert not any("PersonInImage" in ln for ln in lines)
+
+
+def test_keyword_lines_clear_when_our_last_entry_goes_away():
+    # Every entry was ours and none is assigned any more -> emit the bare clear line so the
+    # stale value actually leaves the file.
+    existing = KeywordSets(subject=set(), hierarchical={"People|Old"}, persons={"Old"})
+    lines = keyword_argfile_lines(existing, tags=set(), people=set(), owned_people={"Old"})
+    assert lines.count("-XMP-lr:HierarchicalSubject=") == 1
+    assert not any(ln.startswith("-XMP-lr:HierarchicalSubject=People") for ln in lines)
+    assert lines.count("-XMP-iptcExt:PersonInImage=") == 1
+
+
+def test_keyword_lines_still_accept_a_plain_set_of_subjects():
+    # Back-compat: callers/tests that pass just the dc:Subject set keep working.
+    lines = keyword_argfile_lines({"Holiday"}, tags={"beach"}, people={"Mum"})
+    assert "-XMP-dc:Subject=Holiday" in lines and "-XMP-dc:Subject=beach" in lines
+    assert "-XMP-iptcExt:PersonInImage=Mum" in lines

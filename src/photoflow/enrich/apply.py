@@ -202,6 +202,11 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
         for k, v in (read_keywords([p["target"] for p in pending]) if pending else {}).items()
     }
 
+    # Every name photoflow knows about (step 1's upserts included, so freshly named people
+    # count). Only these may be replaced in PersonInImage - anything else on the file was
+    # written by another tool and must survive the rewrite (H11).
+    owned_people = {r["name"] for r in conn.execute("SELECT name FROM persons")}
+
     blocks: list[tuple[int, str, str, list[str]]] = []  # (file_id, sig, dest, argfile lines)
     skipped_unreadable = 0
     for p in pending:
@@ -228,6 +233,7 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
             p["people"],
             prefix=cfg.people_keyword_prefix,
             iptc=cfg.write_iptc_keywords,
+            owned_people=owned_people,
         )
         if cfg.write_mwg_regions and p["regions"] and p["w"] and p["h"]:
             lines += region_argfile_lines(p["w"], p["h"], p["regions"])
