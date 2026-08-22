@@ -25,7 +25,12 @@ from pathlib import Path
 from photoflow.audit import log_action
 from photoflow.enrich.page import face_is_applied, tag_is_applied
 from photoflow.enrich.regions import keyword_argfile_lines, region_argfile_lines
-from photoflow.exiftool import exiftool_apply_argfile, exiftool_available, read_keywords
+from photoflow.exiftool import (
+    KeywordSets,
+    exiftool_apply_argfile,
+    exiftool_available,
+    read_keywords,
+)
 from photoflow.xmp import EMBED_EXT
 
 # -execute blocks per exiftool process. exiftool does NOT abort a run on a bad file: it keeps
@@ -218,11 +223,11 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
             # never created. There are no keywords to preserve, so an empty union is correct
             # (treating this as "unreadable" would strand the file forever: no rerun and not
             # even --all could ever produce the sidecar).
-            existing = set()
+            existing = KeywordSets()
         else:
             # R1: the target EXISTS but exiftool returned no record for it - usually one bad
             # file dropping out of the JSON while its batch-mates come back fine (a malformed
-            # response loses the whole chunk). Writing existing=set() here would CLEAR every
+            # response loses the whole chunk). Writing an empty KeywordSets would CLEAR every
             # pre-existing keyword on the file, so skip it and retry next run.
             skipped_unreadable += 1
             print(f"  WARNING: could not read existing keywords, skipping {p['dest']}")

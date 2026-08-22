@@ -71,7 +71,7 @@ def region_argfile_lines(img_w: int, img_h: int, regions: Iterable[tuple[str, Bb
 
 
 def keyword_argfile_lines(
-    existing,
+    existing: KeywordSets | Iterable[str],
     tags: Iterable[str],
     people: Iterable[str],
     *,
@@ -85,12 +85,23 @@ def keyword_argfile_lines(
     plain set of dc:Subject values for callers that only have those). dc:Subject is a pure
     UNION so user keywords and photoflow's provenance folder keywords are never lost.
 
-    The two people-shaped lists are trickier, because other tools write into them too:
-      * lr:HierarchicalSubject - everything NOT under `<prefix>|` is foreign (Places|Paris
-        from digiKam) and is preserved verbatim; only our `<prefix>|` branch is replaced.
-      * Iptc4xmpExt:PersonInImage - names photoflow OWNS (`owned_people`, i.e. every row in
-        the persons table) are ours to replace; any other name was written by another tool
-        and survives.
+    The two people-shaped lists are trickier, because other tools write into them too, so
+    both apply the SAME ownership rule: an entry naming somebody photoflow owns
+    (`owned_people` = every row of the persons table) is ours to replace; every other entry
+    is foreign and is preserved verbatim.
+      * Iptc4xmpExt:PersonInImage - compared by bare name.
+      * lr:HierarchicalSubject - only `<prefix>|<owned name>` counts as ours. Matching on the
+        `<prefix>|` branch alone would be wrong: digiKam's people root IS "People", so a
+        `People|Grandma` it wrote would be deleted while `PersonInImage=Grandma` survived,
+        leaving the two lists contradicting each other.
+
+    Ownership is global, not per-file: a name photoflow owns from OTHER photos is stripped
+    from a file where it assigns nobody. That is the intended "we un-tagged this person"
+    behaviour, and the price is that any future code path deleting a persons row must first
+    strip that name from the affected files - once the row is gone the name reads as foreign
+    and becomes unremovable. `enrich merge` (DELETE FROM persons) is today's only deleter, so
+    it is the one that owes the files a keyword_remove_argfile_lines pass.
+
     Each list is cleared (`-TAG=`) then rewritten so re-applying yields the same set instead
     of duplicating entries. A list whose resulting set is identical to what's already there
     is left completely untouched, so a tags-only file never gets a stray clear-and-rewrite
@@ -115,8 +126,8 @@ def keyword_argfile_lines(
         lines += [f"-IPTC:Keywords={s}" for s in subjects]
 
     if prefix:
-        new_hier = {h for h in ex_hier if not h.startswith(f"{prefix}|")}
-        new_hier |= {f"{prefix}|{p}" for p in people}
+        ours = {f"{prefix}|{n}" for n in owned}
+        new_hier = (ex_hier - ours) | {f"{prefix}|{p}" for p in people}
     else:
         new_hier = set(ex_hier)
     lines += _replace_list_lines("-XMP-lr:HierarchicalSubject", ex_hier, new_hier)

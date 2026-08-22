@@ -8,7 +8,7 @@ from photoflow.enrich.regions import (
     normalized_region,
     region_argfile_lines,
 )
-from photoflow.exiftool import KeywordSets
+from photoflow.exiftool import KeywordSets, _tag_set
 
 
 def test_normalized_region_center_and_size():
@@ -118,7 +118,9 @@ def test_keyword_lines_keep_foreign_hierarchy_and_replace_only_our_branch():
         hierarchical={"Places|Paris", "People|Stale"},
         persons=set(),
     )
-    lines = keyword_argfile_lines(existing, tags=set(), people={"Mum"}, prefix="People")
+    lines = keyword_argfile_lines(
+        existing, tags=set(), people={"Mum"}, prefix="People", owned_people={"Mum", "Stale"}
+    )
     hier = [
         ln.split("=", 1)[1]
         for ln in lines
@@ -168,3 +170,47 @@ def test_keyword_lines_still_accept_a_plain_set_of_subjects():
     lines = keyword_argfile_lines({"Holiday"}, tags={"beach"}, people={"Mum"})
     assert "-XMP-dc:Subject=Holiday" in lines and "-XMP-dc:Subject=beach" in lines
     assert "-XMP-iptcExt:PersonInImage=Mum" in lines
+
+
+def test_keyword_lines_keep_a_foreign_people_entry_on_a_tags_only_apply():
+    # digiKam's people root IS "People", so a People|Grandma it wrote is NOT ours just
+    # because of the prefix - it names nobody photoflow knows. Both lists must agree.
+    existing = KeywordSets(subject=set(), hierarchical={"People|Grandma"}, persons={"Grandma"})
+    lines = keyword_argfile_lines(existing, tags={"beach"}, people=set(), owned_people={"Mum"})
+    assert not any("HierarchicalSubject" in ln for ln in lines)
+    assert not any("PersonInImage" in ln for ln in lines)
+
+
+def test_keyword_lines_hierarchy_and_persons_agree_after_a_people_apply():
+    # A foreign Grandma survives in BOTH lists; our own stale name leaves BOTH.
+    existing = KeywordSets(
+        subject=set(),
+        hierarchical={"People|Grandma", "People|Old", "Places|Paris"},
+        persons={"Grandma", "Old"},
+    )
+    lines = keyword_argfile_lines(existing, tags=set(), people={"Mum"}, owned_people={"Mum", "Old"})
+    hier = {
+        ln.split("=", 1)[1]
+        for ln in lines
+        if ln.startswith("-XMP-lr:HierarchicalSubject=") and ln != "-XMP-lr:HierarchicalSubject="
+    }
+    persons = {
+        ln.split("=", 1)[1]
+        for ln in lines
+        if ln.startswith("-XMP-iptcExt:PersonInImage=") and ln != "-XMP-iptcExt:PersonInImage="
+    }
+    assert hier == {"People|Grandma", "People|Mum", "Places|Paris"}
+    assert persons == {"Grandma", "Mum"}
+    # the two people-shaped lists name exactly the same humans
+    assert {h.split("|", 1)[1] for h in hier if h.startswith("People|")} == persons
+
+
+def test_tag_set_reads_numeric_scalars_and_strips():
+    # exiftool -j emits an unquoted number for a purely numeric keyword; core apply writes
+    # folder-year keywords like 2019, so dropping these would DELETE them on enrich apply.
+    assert _tag_set(2024) == {"2024"}
+    assert _tag_set([2024, "beach"]) == {"2024", "beach"}
+    assert _tag_set(" beach ") == {"beach"}
+    assert _tag_set(None) == set()
+    lines = keyword_argfile_lines(KeywordSets(subject=_tag_set(2024)), tags={"beach"}, people=set())
+    assert "-XMP-dc:Subject=2024" in lines

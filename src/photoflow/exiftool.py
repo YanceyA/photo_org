@@ -75,11 +75,17 @@ class KeywordSets:
 
 
 def _tag_set(value) -> set[str]:
-    """exiftool returns a scalar for a one-item list and omits absent tags entirely."""
-    if isinstance(value, str):
-        return {value}
+    """exiftool returns a scalar for a one-item list and omits absent tags entirely.
+
+    The scalar is not always a string: `-j` emits an unquoted JSON number for a purely
+    numeric keyword, so a lone `2019` folder-year keyword (which core apply writes as
+    provenance) arrives as int 2019. Dropping it here would make the clear-and-rewrite
+    below DELETE it from the file. Values are stripped, matching _upsert_person.
+    """
+    if isinstance(value, (str, int, float)):
+        return {str(value).strip()}
     if isinstance(value, list):
-        return {str(x) for x in value}
+        return {str(x).strip() for x in value}
     return set()
 
 

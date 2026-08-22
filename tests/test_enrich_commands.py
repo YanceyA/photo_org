@@ -26,7 +26,7 @@ from photoflow.enrich import review as ereview
 from photoflow.enrich import scan as escan
 from photoflow.enrich import status as estatus
 from photoflow.enrich import tagger as etagger
-from photoflow.exiftool import ExiftoolResult
+from photoflow.exiftool import ExiftoolResult, KeywordSets
 
 
 def _seed(tmp_path: Path, n=3):
@@ -743,6 +743,35 @@ def test_apply_preserves_library_mtime(tmp_path):
     assert os.stat(dest).st_mtime == pytest.approx(before, abs=2)
 
 
+def test_apply_preserves_foreign_entries_without_exiftool(tmp_path, monkeypatch):
+    # Same guarantee as the round-trip below, but through a fake read_keywords so CI (no
+    # exiftool) still covers the KeywordSets/owned_people wiring in cmd_enrich_apply.
+    conn, workdir, lib, ids = _one_face_file(tmp_path, person="Mum")
+    # "Old" is a name photoflow OWNS but no longer assigns on this file; "Grandma" is foreign.
+    conn.execute("INSERT INTO persons(name, created) VALUES ('Old','x')")
+    conn.commit()
+    existing = KeywordSets(
+        subject={"Holiday"},
+        hierarchical={"Places|Paris", "People|Old"},
+        persons={"Grandma", "Old"},
+    )
+    captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: existing for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    lines = captured["lines"]
+    assert "-XMP-lr:HierarchicalSubject=Places|Paris" in lines  # foreign hierarchy kept
+    assert "-XMP-iptcExt:PersonInImage=Grandma" in lines  # foreign person kept
+    assert "-XMP-dc:Subject=Holiday" in lines  # existing keyword kept
+    assert "-XMP-lr:HierarchicalSubject=People|Mum" in lines  # ours written
+    assert "-XMP-iptcExt:PersonInImage=Mum" in lines
+    assert "-XMP-lr:HierarchicalSubject=People|Old" not in lines  # ours, unassigned -> gone
+    assert "-XMP-iptcExt:PersonInImage=Old" not in lines
+
+
 @pytest.mark.exiftool
 def test_apply_preserves_foreign_hierarchy_and_person(tmp_path):
     # H11 end-to-end: values another tool wrote survive an apply.
@@ -769,6 +798,7 @@ def test_apply_preserves_foreign_hierarchy_and_person(tmp_path):
         ["exiftool", "-j", "-XMP-lr:HierarchicalSubject", "-XMP-iptcExt:PersonInImage", dest],
         capture_output=True,
         text=True,
+        check=True,
     )
     rec = json.loads(out.stdout)[0]
 
