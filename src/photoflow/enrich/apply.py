@@ -7,11 +7,16 @@ writes XMP into each copied file (embed for EMBED_EXT, .xmp sidecar otherwise):
 
 The keyword write is a read-union-replace so it never clobbers apply's provenance
 description / folder keywords, and re-running is idempotent.
+
+The pass is incremental: each file carries a signature of the people/tags/regions apply last
+wrote (enrich_state.applied_sig), and a file whose signature is unchanged is left alone
+(`--all` forces the rewrite). Writes use -P so the library mtime never moves.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from collections import defaultdict
 from datetime import datetime
@@ -20,8 +25,23 @@ from pathlib import Path
 from photoflow.audit import log_action
 from photoflow.enrich.page import face_is_applied, tag_is_applied
 from photoflow.enrich.regions import keyword_argfile_lines, region_argfile_lines
-from photoflow.exiftool import exiftool_apply_argfile, read_keywords
+from photoflow.exiftool import (
+    KeywordSets,
+    exiftool_apply_argfile,
+    exiftool_available,
+    read_keywords,
+)
 from photoflow.xmp import EMBED_EXT
+
+# -execute blocks per exiftool process. exiftool does NOT abort a run on a bad file: it keeps
+# going and prints a result line per -execute block, so a non-zero rc only means "at least one
+# block failed". A failed batch is therefore re-run one block at a time to find out exactly
+# which files failed - the healthy ones still earn their applied_sig instead of being stranded
+# with their 99 batch-mates and rewritten on every future run.
+WRITE_BATCH = 100
+
+# Per-file failures printed in full before collapsing to a "... and N more" line.
+MAX_FAILURE_REPORTS = 10
 
 
 def _read_csv(path) -> list[dict]:
@@ -42,16 +62,51 @@ def _upsert_person(conn, name: str) -> int:
     return cur.lastrowid
 
 
+def _signature(tags, people, regions, img_w, img_h, cfg) -> str:
+    """Hash of everything this file's write depends on. Equal signature => skip the rewrite.
+
+    Deliberately excludes the file's EXISTING keywords: a keyword added in digiKam must not
+    trigger a rewrite (the write is a union, so nothing would change) - only OUR data does.
+    The three cfg switches DO belong here: each gates real output, so flipping one in
+    photoflow.toml has to invalidate every signature or the next apply silently writes nothing.
+    """
+    payload = {
+        "tags": list(tags),
+        "people": list(people),
+        "regions": [[name, [float(v) for v in bbox]] for name, bbox in regions],
+        "dims": [img_w, img_h],
+        "cfg": [cfg.write_mwg_regions, cfg.write_iptc_keywords, cfg.people_keyword_prefix],
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
     dry = getattr(args, "dry_run", False)
+    rewrite_all = getattr(args, "all", False)
+    if not exiftool_available():
+        print("enrich apply: exiftool not found on PATH - nothing written.")
+        return
     face_csv = _read_csv(workdir / "faces.csv")
-    tag_csv = _read_csv(workdir / "tags.csv")
+    tags_csv_path = workdir / "tags.csv"
+    tags_csv_exists = tags_csv_path.exists()
+    tag_csv = _read_csv(tags_csv_path)
+    now = datetime.now().isoformat(timespec="seconds")
 
-    # 1. make person assignments durable (faces.person_id)
+    # 1. make person assignments durable (faces.person_id).
+    # A CSV keep row only ever grants a FIRST name: enrich review emits faces with
+    # person_id IS NULL only, so a named face never appears in faces.csv and a CSV row can
+    # never legitimately rename one. Renames go through `enrich merge`. Guarding on
+    # person_id IS NULL (and skipping the person upsert entirely) stops a stale CSV from
+    # re-creating a merged-away alias and repointing its faces back (R8).
     for row in face_csv:
-        if face_is_applied(row.get("person", ""), row.get("decision", "")):
-            pid = _upsert_person(conn, row["person"].strip())
-            conn.execute("UPDATE faces SET person_id=? WHERE id=?", (pid, int(row["face_id"])))
+        if not face_is_applied(row.get("person", ""), row.get("decision", "")):
+            continue
+        face_id = int(row["face_id"])
+        cur = conn.execute("SELECT person_id FROM faces WHERE id=?", (face_id,)).fetchone()
+        if cur is None or cur["person_id"] is not None:
+            continue
+        pid = _upsert_person(conn, row["person"].strip())
+        conn.execute("UPDATE faces SET person_id=? WHERE id=?", (pid, face_id))
 
     # 1b. "not interested" clusters: a cluster whose every member is skipped (none named) was
     # dismissed wholesale in the page -> mark its faces ignored so re-cluster/review drop them
@@ -68,18 +123,51 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
                     "UPDATE faces SET ignored=1, cluster_id=NULL, cluster_prob=NULL WHERE id=?",
                     (int(m["face_id"]),),
                 )
-    if not dry:
-        conn.commit()
-
-    # 2. tag decision overlay: blacklist wildcards + per-(file,tag) review decisions
-    blacklist = {
+    # 2. tag decision overlay: blacklist wildcards (durable in tag_blacklist + this run's CSV
+    # rows) and per-(file,tag) review decisions.
+    #
+    # tags.csv is authoritative for the blacklist WHEN IT EXISTS: `enrich review` re-emits every
+    # DB-blacklisted tag as a `*`/reject row (page.py:blacklist_rows), and the page's tagsCsv()
+    # always writes a `*` row for every tag currently in its in-page blacklist Set - not just
+    # newly added ones. So a tag the DB still has but the CSV's `*` rows no longer mention was
+    # deliberately un-blacklisted by the user, and apply must delete it from tag_blacklist
+    # (there was previously no path to remove a tag once blacklisted - csv ∪ db only grew).
+    # A MISSING tags.csv (never reviewed yet, or the file was deleted) must never be read as
+    # "the user cleared everything", so that case keeps the old DB-only behavior untouched.
+    #
+    # Known limitation (backlog): this only stops FUTURE writes. A tag already embedded in a
+    # file's dc:Subject before it was blacklisted is not retroactively stripped - the keyword
+    # write below is a read-union-replace, never a delete. `keyword_remove_argfile_lines`
+    # (regions.py, added for `merge`) already has the exiftool plumbing for a future
+    # `enrich apply --strip-blacklisted` / `enrich unblacklist --strip`.
+    csv_blacklist = {
         r["tag"] for r in tag_csv if str(r.get("file_id")) == "*" and r.get("decision") == "reject"
     }
+    db_blacklist = {r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")}
+    for t in sorted(csv_blacklist - db_blacklist):
+        conn.execute("INSERT OR IGNORE INTO tag_blacklist(tag, ts) VALUES (?,?)", (t, now))
+    if tags_csv_exists:
+        un_blacklisted = db_blacklist - csv_blacklist
+        for t in sorted(un_blacklisted):
+            conn.execute("DELETE FROM tag_blacklist WHERE tag=?", (t,))
+            log_action(conn, log_fh, run_id, 0, "tag_unblacklisted", t)
+        if un_blacklisted:
+            names = ", ".join(sorted(un_blacklisted))
+            print(f"  un-blacklisted {len(un_blacklisted)} tag(s): {names}")
+        blacklist = csv_blacklist
+    else:
+        blacklist = csv_blacklist | db_blacklist
     review_dec = {
         (str(r["file_id"]), r["tag"]): (r.get("decision") or "")
         for r in tag_csv
         if str(r.get("file_id")) != "*"
     }
+
+    # R2: in dry mode NOTHING above is committed - the whole command runs inside one
+    # transaction that is rolled back at the end, so a dry run can't hide clusters (or new
+    # blacklist entries) from the next `enrich review`.
+    if not dry:
+        conn.commit()
 
     # 3. candidate files: any assigned-person face or any tag. EXISTS subqueries (not an
     # IN(...) list) so this never trips SQLite's 32766-variable limit on a large library.
@@ -96,13 +184,18 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
         targets[fr["id"]] = (dest if is_embed else dest + ".xmp", dest)
     if not targets:
         print("enrich apply: nothing to write (no assigned people or tags).")
+        if dry:
+            conn.rollback()
         return
 
-    existing_map = read_keywords([t for (t, _d) in targets.values()]) if targets else {}
+    prior_sig = {
+        r["file_id"]: r["applied_sig"]
+        for r in conn.execute("SELECT file_id, applied_sig FROM enrich_state")
+    }
 
-    xmp_args: list[str] = []
-    applied_ids: list[int] = []
-    n = 0
+    # 4. pass one: compute what each file WOULD get and skip the ones already carrying it.
+    pending: list[dict] = []
+    unchanged = 0
     for fid, (target, dest) in targets.items():
         tags_for_file = sorted(
             t["tag"]
@@ -116,7 +209,7 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
         img_w = img_h = None
         for fa in conn.execute(
             "SELECT fa.bbox, fa.img_w, fa.img_h, p.name FROM faces fa "
-            "JOIN persons p ON p.id = fa.person_id WHERE fa.file_id=?",
+            "JOIN persons p ON p.id = fa.person_id WHERE fa.file_id=? ORDER BY fa.id",
             (fid,),
         ):
             people.append(fa["name"])
@@ -130,36 +223,137 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
 
         if not tags_for_file and not people:
             continue
+        sig = _signature(tags_for_file, people, regions, img_w, img_h, cfg)
+        if not rewrite_all and prior_sig.get(fid) == sig:
+            unchanged += 1
+            continue
+        pending.append(
+            {
+                "fid": fid,
+                "target": target,
+                "dest": dest,
+                "tags": tags_for_file,
+                "people": people,
+                "regions": regions,
+                "w": img_w,
+                "h": img_h,
+                "sig": sig,
+            }
+        )
 
-        existing = existing_map.get(str(Path(target)), set())
+    # 5. pass two: read the CURRENT keywords of just the files we're about to rewrite.
+    # Keys are re-normalized because exiftool reports SourceFile with forward slashes even on
+    # Windows (HANDOFF §7) - a mismatch here would look like an unreadable file below.
+    existing_map = {
+        str(Path(k)): v
+        for k, v in (read_keywords([p["target"] for p in pending]) if pending else {}).items()
+    }
+
+    # Every name photoflow knows about (step 1's upserts included, so freshly named people
+    # count). Only these may be replaced in PersonInImage - anything else on the file was
+    # written by another tool and must survive the rewrite (H11).
+    owned_people = {r["name"] for r in conn.execute("SELECT name FROM persons")}
+
+    blocks: list[tuple[int, str, str, list[str]]] = []  # (file_id, sig, dest, argfile lines)
+    skipped_unreadable = 0
+    for p in pending:
+        key = str(Path(p["target"]))
+        if key in existing_map:
+            existing = existing_map[key]
+        elif not Path(p["target"]).exists():
+            # Nothing there yet - the normal case for a RAW/video whose .xmp sidecar apply has
+            # never created. There are no keywords to preserve, so an empty union is correct
+            # (treating this as "unreadable" would strand the file forever: no rerun and not
+            # even --all could ever produce the sidecar).
+            existing = KeywordSets()
+        else:
+            # R1: the target EXISTS but exiftool returned no record for it - usually one bad
+            # file dropping out of the JSON while its batch-mates come back fine (a malformed
+            # response loses the whole chunk). Writing an empty KeywordSets would CLEAR every
+            # pre-existing keyword on the file, so skip it and retry next run.
+            skipped_unreadable += 1
+            print(f"  WARNING: could not read existing keywords, skipping {p['dest']}")
+            continue
         lines = keyword_argfile_lines(
             existing,
-            tags_for_file,
-            people,
+            p["tags"],
+            p["people"],
             prefix=cfg.people_keyword_prefix,
             iptc=cfg.write_iptc_keywords,
+            owned_people=owned_people,
         )
-        if cfg.write_mwg_regions and regions and img_w and img_h:
-            lines += region_argfile_lines(img_w, img_h, regions)
-
+        if cfg.write_mwg_regions and p["regions"] and p["w"] and p["h"]:
+            lines += region_argfile_lines(p["w"], p["h"], p["regions"])
         if dry:
-            print(f"DRY enrich {dest}: +{len(tags_for_file)} tags, {len(people)} people")
-        else:
-            xmp_args += ["-overwrite_original", *lines, target, "-execute"]
-            applied_ids.append(fid)
-        n += 1
-
-    if not dry and xmp_args:
-        print("writing enrich XMP (exiftool)...")
-        exiftool_apply_argfile(xmp_args)
-    if not dry:
-        for fid in applied_ids:
-            conn.execute(
-                "INSERT INTO enrich_state(file_id, applied, ts) VALUES (?,1,?) "
-                "ON CONFLICT(file_id) DO UPDATE SET applied=1, ts=excluded.ts",
-                (fid, datetime.now().isoformat(timespec="seconds")),
+            print(f"DRY enrich {p['dest']}: +{len(p['tags'])} tags, {len(p['people'])} people")
+            continue
+        # -P preserves the file's mtime (H9); without it every apply bumps the whole library.
+        blocks.append(
+            (
+                p["fid"],
+                p["sig"],
+                p["dest"],
+                ["-P", "-overwrite_original", *lines, p["target"], "-execute"],
             )
-        conn.commit()
-    log_action(conn, log_fh, run_id, 0, "enrich_apply", f"files={n} dry={dry}")
+        )
+
+    # 6. write in batches, then re-run any failed batch one block at a time so a single
+    # unwritable file can't cost its batch-mates their applied_sig (see WRITE_BATCH).
+    def _mark_applied(fid: int, sig: str) -> None:
+        conn.execute(
+            "INSERT INTO enrich_state(file_id, applied, applied_sig, ts) VALUES (?,1,?,?) "
+            "ON CONFLICT(file_id) DO UPDATE SET applied=1, applied_sig=excluded.applied_sig,"
+            " ts=excluded.ts",
+            (fid, sig, now),
+        )
+        log_action(conn, log_fh, run_id, fid, "enrich_applied", sig)
+
+    written = failed = reported = 0
+    for i in range(0, len(blocks), WRITE_BATCH):
+        chunk = blocks[i : i + WRITE_BATCH]
+        lines = []
+        for _fid, _sig, _dest, block in chunk:
+            lines += block
+        print(f"  writing enrich XMP {i + 1}-{i + len(chunk)} of {len(blocks)} (exiftool)...")
+        res = exiftool_apply_argfile(lines)
+        if res.returncode == 0:
+            for fid, sig, _dest, _block in chunk:
+                _mark_applied(fid, sig)
+                written += 1
+            continue
+        print(
+            f"  exiftool batch rc={res.returncode}: retrying its {len(chunk)} file(s)"
+            " individually to find the bad one(s)..."
+        )
+        for fid, sig, dest, block in chunk:
+            one = exiftool_apply_argfile(block)
+            if one.returncode == 0:
+                _mark_applied(fid, sig)
+                written += 1
+                continue
+            failed += 1
+            if reported < MAX_FAILURE_REPORTS:
+                reported += 1
+                print(f"  FAILED (rc={one.returncode}), not marking applied: {dest}")
+                for err in (one.stderr or "").strip().splitlines()[:5]:
+                    print(f"    {err}")
+    if failed > reported:
+        print(f"  ... and {failed - reported} more failure(s) not shown.")
+
+    if dry:
+        conn.rollback()  # R2: discard step 1/1b - a dry run mutates nothing
+    log_action(
+        conn,
+        log_fh,
+        run_id,
+        0,
+        "enrich_apply",
+        f"written={written} unchanged={unchanged} skipped={skipped_unreadable} "
+        f"failed={failed} dry={dry}",
+    )
     conn.commit()
-    print(f"enrich apply complete: {n} files {'(dry-run, nothing written)' if dry else 'written'}.")
+    print(
+        f"enrich apply: written {written} / unchanged {unchanged} / "
+        f"skipped-unreadable {skipped_unreadable} / failed {failed}"
+        f"{' (dry-run, nothing written)' if dry else ''}."
+    )

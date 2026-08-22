@@ -8,13 +8,6 @@ from pathlib import Path
 from photoflow.apply import cmd_apply
 from photoflow.config import load_config
 from photoflow.db import new_run, open_db
-from photoflow.enrich.apply import cmd_enrich_apply
-from photoflow.enrich.assign import cmd_enrich_assign
-from photoflow.enrich.cluster import cmd_enrich_cluster
-from photoflow.enrich.merge import cmd_enrich_merge
-from photoflow.enrich.review import cmd_enrich_review
-from photoflow.enrich.scan import cmd_enrich_scan
-from photoflow.enrich.status import cmd_enrich_status
 from photoflow.planner import cmd_plan
 from photoflow.prune import cmd_prune_sidecars
 from photoflow.refile import cmd_refile
@@ -22,15 +15,32 @@ from photoflow.review import cmd_review
 from photoflow.scan import cmd_scan
 from photoflow.status import cmd_status
 
-ENRICH_COMMANDS = {
-    "scan": cmd_enrich_scan,
-    "cluster": cmd_enrich_cluster,
-    "assign": cmd_enrich_assign,
-    "merge": cmd_enrich_merge,
-    "review": cmd_enrich_review,
-    "apply": cmd_enrich_apply,
-    "status": cmd_enrich_status,
-}
+
+def enrich_command(step: str):
+    """Import an enrich command module lazily.
+
+    Core commands must run on a bare install (`dependencies = ["pillow-heif"]`), but every
+    enrich module pulls numpy/scikit-learn directly or through enrich.clustering. Importing
+    them at photoflow.cli load time made `photoflow status` fail with ModuleNotFoundError
+    before argparse ran, so the import happens only once an `enrich` sub-step is dispatched.
+    """
+    from photoflow.enrich.apply import cmd_enrich_apply
+    from photoflow.enrich.assign import cmd_enrich_assign
+    from photoflow.enrich.cluster import cmd_enrich_cluster
+    from photoflow.enrich.merge import cmd_enrich_merge
+    from photoflow.enrich.review import cmd_enrich_review
+    from photoflow.enrich.scan import cmd_enrich_scan
+    from photoflow.enrich.status import cmd_enrich_status
+
+    return {
+        "scan": cmd_enrich_scan,
+        "cluster": cmd_enrich_cluster,
+        "assign": cmd_enrich_assign,
+        "merge": cmd_enrich_merge,
+        "review": cmd_enrich_review,
+        "apply": cmd_enrich_apply,
+        "status": cmd_enrich_status,
+    }[step]
 
 
 def main():
@@ -103,6 +113,7 @@ def main():
     esub.add_parser("review", help="export enrich_review.html + faces.csv + tags.csv")
     ea = esub.add_parser("apply", help="write confirmed people + tags into the library files")
     ea.add_argument("--dry-run", action="store_true")
+    ea.add_argument("--all", action="store_true", help="rewrite every file, even unchanged ones")
     esub.add_parser("status", help="enrich summary (faces, clusters, tags)")
 
     args = ap.parse_args()
@@ -112,7 +123,7 @@ def main():
 
     if args.cmd == "enrich":
         label = f"enrich-{args.enrich_step}"
-        command_fn = ENRICH_COMMANDS[args.enrich_step]
+        command_fn = enrich_command(args.enrich_step)
     else:
         label = args.cmd
         command_fn = {

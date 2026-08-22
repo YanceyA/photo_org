@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS enrich_state (   -- incremental skip, like scan's siz
     faces_done INTEGER DEFAULT 0,
     tags_done INTEGER DEFAULT 0,
     applied INTEGER DEFAULT 0,
+    applied_sig TEXT,          -- hash of what apply last wrote; equal => skip the rewrite
+    errors INTEGER DEFAULT 0,  -- consecutive model failures; 3 strikes and scan skips the file
+    ts TEXT
+);
+
+CREATE TABLE IF NOT EXISTS tag_blacklist (  -- durable "never write this tag" decisions (R5)
+    tag TEXT PRIMARY KEY,
     ts TEXT
 );
 """
@@ -126,6 +133,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # the resumable hash+metadata passes pick it up exactly as they would today.
         conn.execute("ALTER TABLE files ADD COLUMN meta_read INTEGER DEFAULT 0")
         conn.execute("UPDATE files SET meta_read=1 WHERE content_hash IS NOT NULL")
+        conn.commit()
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(enrich_state)")}
+    if "applied_sig" not in cols:
+        conn.execute("ALTER TABLE enrich_state ADD COLUMN applied_sig TEXT")
+        conn.commit()
+    if "errors" not in cols:
+        conn.execute("ALTER TABLE enrich_state ADD COLUMN errors INTEGER DEFAULT 0")
         conn.commit()
 
 

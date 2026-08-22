@@ -11,16 +11,23 @@ distance, so this is cosine-equivalent while staying on HDBSCAN's fast tree path
 
 from __future__ import annotations
 
-import numpy as np
+from typing import TYPE_CHECKING
+
+# numpy is imported INSIDE each function, not at module scope: photoflow.cli reaches this
+# module through the enrich dispatch, and core commands must import on a bare install (R4).
+if TYPE_CHECKING:
+    import numpy as np
 
 
-def _l2_normalize(x: np.ndarray) -> np.ndarray:
+def _l2_normalize(x):
+    import numpy as np
+
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     return x / np.clip(norms, 1e-12, None)
 
 
 def cluster_embeddings(
-    embeddings: np.ndarray,
+    embeddings,
     *,
     min_cluster_size: int = 5,
     min_samples: int | None = None,
@@ -35,6 +42,8 @@ def cluster_embeddings(
         medoids: {cluster_label: row_index} - the representative (real, observed) face per
             cluster, suitable to show as the cluster's sample thumbnail.
     """
+    import numpy as np
+
     embeddings = np.asarray(embeddings, dtype=np.float32)
     n = embeddings.shape[0]
     if n == 0:
@@ -72,7 +81,7 @@ def cluster_embeddings(
 
 
 def nearest_person(
-    embedding: np.ndarray,
+    embedding,
     person_centroids: dict[int, np.ndarray],
     threshold: float,
 ) -> tuple[int | None, float]:
@@ -82,6 +91,8 @@ def nearest_person(
     person, so incremental imports don't have to re-cluster everyone. Returns
     (person_id, similarity) when the best match is >= threshold, else (None, best_sim).
     """
+    import numpy as np
+
     if not person_centroids:
         return None, 0.0
     q = np.asarray(embedding, dtype=np.float32)

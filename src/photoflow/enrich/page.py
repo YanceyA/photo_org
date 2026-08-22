@@ -109,6 +109,25 @@ def tag_rows(review_items: list, prior: dict) -> list[dict]:
     return rows
 
 
+def blacklist_rows(tags: list[str]) -> list[dict]:
+    """tags.csv rows for the global blacklist (file_id='*', reject).
+
+    Re-emitted from the DB on every review so the decision carries forward: the page seeds
+    its Set from them, and apply drops the tag everywhere.
+    """
+    return [
+        {
+            "file_id": "*",
+            "tag": t,
+            "source": "",
+            "score": "",
+            "suggestion": "auto",
+            "decision": "reject",
+        }
+        for t in tags
+    ]
+
+
 def write_faces_csv(path, rows: list[dict]) -> None:
     _write_csv(path, FACE_COLUMNS, rows)
 
@@ -192,7 +211,9 @@ def build_people_payload(
     }
 
 
-def build_tags_payload(items: list, rows: list[dict], workdir_key: str) -> dict:
+def build_tags_payload(
+    items: list, rows: list[dict], workdir_key: str, blacklist: list[str] | None = None
+) -> dict:
     """People tab's sibling: review-band tags grouped BY TAG (one tag, many candidate
     photos) + a per-tag count summary of the auto-accepted bulk (for the global blacklist)."""
     by_key = {(str(r["file_id"]), r["tag"]): r for r in rows}
@@ -222,7 +243,12 @@ def build_tags_payload(items: list, rows: list[dict], workdir_key: str) -> dict:
         key=lambda s: s["count"],
         reverse=True,
     )
-    return {"workdir": workdir_key, "reviewTags": review, "autoSummary": summary}
+    return {
+        "workdir": workdir_key,
+        "reviewTags": review,
+        "autoSummary": summary,
+        "blacklist": sorted(blacklist or []),
+    }
 
 
 def _assign_thumb(item: dict) -> str:
@@ -407,8 +433,15 @@ const TAG_COLS = ["file_id","tag","source","score","suggestion","decision"];
 const faceState = {}, faceMeta = {};
 for (const c of PEOPLE.clusters) for (const m of c.members) { faceState[m.face_id] = {person:m.person||"", decision:m.decision||""}; faceMeta[m.face_id]=m; }
 for (const m of PEOPLE.noise) { faceState[m.face_id] = {person:m.person||"", decision:m.decision||""}; faceMeta[m.face_id]=m; }
-// tag state: "file_id|tag" -> decision; plus a global blacklist set.
-const tagState = {}, blacklist = new Set();
+// tag state: "file_id|tag" -> decision; plus a global blacklist set. blacklistAdded/
+// blacklistRemoved are add/remove TOMBSTONES (not the Set itself) so a local un-blacklist
+// survives reload: storing the raw Set couldn't tell "same as the DB payload" apart from
+// "user removed a payload entry", so a removal was silently re-added from TAGS.blacklist on
+// the next load (R5 follow-up).
+const tagState = {}, blacklist = new Set(), blacklistAdded = new Set(), blacklistRemoved = new Set();
+// Seed from the DB-backed payload FIRST, then let localStorage add this session's picks:
+// seeding only from storage meant a saved blacklist silently reverted on another machine (R5).
+for (const t of (TAGS.blacklist || [])) blacklist.add(t);
 for (const g of TAGS.reviewTags) for (const p of g.photos) tagState[p.file_id+"|"+g.tag] = p.decision||"";
 
 let dirty = {people:false, tags:false}, saved = {people:false, tags:false};
@@ -419,9 +452,10 @@ try {
   if (s) {
     for (const [k,v] of Object.entries(s.faceState||{})) if (k in faceState) faceState[k]=v;
     for (const [k,v] of Object.entries(s.tagState||{})) if (k in tagState) tagState[k]=v;
-    for (const t of (s.blacklist||[])) blacklist.add(t);
+    for (const t of (s.blacklistAdded||[])) { blacklistAdded.add(t); blacklist.add(t); }
+    for (const t of (s.blacklistRemoved||[])) { blacklistRemoved.add(t); blacklist.delete(t); }
     if (s.faceState) dirty.people = true;
-    if (s.tagState || s.blacklist) dirty.tags = true;
+    if (s.tagState || s.blacklistAdded || s.blacklistRemoved) dirty.tags = true;
     if (dirty.people || dirty.tags) document.getElementById("savemsg").textContent = "restored unsaved selections";
   }
 } catch (e) {}
@@ -434,7 +468,7 @@ function thumbHtml(m){
 }
 
 function persist(){
-  try { localStorage.setItem(LSKEY, JSON.stringify({faceState, tagState, blacklist:[...blacklist]})); }
+  try { localStorage.setItem(LSKEY, JSON.stringify({faceState, tagState, blacklistAdded:[...blacklistAdded], blacklistRemoved:[...blacklistRemoved]})); }
   catch(e){ if(!storageWarned){storageWarned=true; document.getElementById("savemsg").textContent="selections won't survive closing the tab (storage blocked)";} }
 }
 
@@ -618,7 +652,9 @@ document.getElementById("reviewtags").addEventListener("click",e=>{
 });
 document.getElementById("autosummary").addEventListener("click",e=>{
   const chip=e.target.closest(".chip"); if(!chip) return;
-  const tag=chip.dataset.tag; if(blacklist.has(tag)) blacklist.delete(tag); else blacklist.add(tag);
+  const tag=chip.dataset.tag;
+  if(blacklist.has(tag)){ blacklist.delete(tag); blacklistAdded.delete(tag); blacklistRemoved.add(tag); }
+  else { blacklist.add(tag); blacklistRemoved.delete(tag); blacklistAdded.add(tag); }
   dirty.tags=true; persist(); chip.classList.toggle("bl",blacklist.has(tag));
   for(const el of document.querySelectorAll("#reviewtags .tag")) if(el.dataset.tag===tag){ const n=el.querySelector(".blnote"); if(n) n.textContent=blacklist.has(tag)?"blacklisted":""; break; }
   mark("tags");

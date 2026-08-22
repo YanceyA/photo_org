@@ -12,6 +12,7 @@ from collections import defaultdict
 from photoflow.audit import log_action
 from photoflow.enrich.imgutil import make_thumb
 from photoflow.enrich.page import (
+    blacklist_rows,
     build_people_payload,
     build_tags_payload,
     face_rows,
@@ -100,12 +101,18 @@ def cmd_enrich_review(conn, workdir, run_id, log_fh, args, cfg):
         else:
             noise.append(m)
 
+    blacklist = {r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")}
+    excluded_by_blacklist = 0
+
     tagthumbs = workdir / "tagthumbs"
     tag_items: list = []
     for r in conn.execute(
         """SELECT t.file_id, t.tag, t.source, t.score, f.dest_path
            FROM tags t JOIN files f ON f.id = t.file_id WHERE t.status='review' ORDER BY t.tag"""
     ):
+        if r["tag"] in blacklist:
+            excluded_by_blacklist += 1  # never written, so don't spend review time on it
+            continue
         thumb_rel = None
         if r["dest_path"]:
             tagthumbs.mkdir(exist_ok=True)
@@ -125,17 +132,30 @@ def cmd_enrich_review(conn, workdir, run_id, log_fh, args, cfg):
                 "source_path": r["dest_path"],
             }
         )
-    auto_items = [
-        {"file_id": r["file_id"], "tag": r["tag"], "suggestion": "auto"}
-        for r in conn.execute("SELECT file_id, tag FROM tags WHERE status='auto'")
-    ]
+    auto_items: list = []
+    for r in conn.execute("SELECT file_id, tag FROM tags WHERE status='auto'"):
+        if r["tag"] in blacklist:
+            excluded_by_blacklist += 1
+            continue
+        auto_items.append({"file_id": r["file_id"], "tag": r["tag"], "suggestion": "auto"})
 
     if not clusters and not noise and not tag_items:
-        print("enrich review: nothing to review yet (run enrich scan + enrich cluster first).")
-        return
+        if excluded_by_blacklist:
+            # Don't return here: faces.csv/tags.csv (with the '*' rows) + the HTML still need to
+            # be (re)written so the blacklist carries forward to `enrich apply` and the next
+            # `enrich review`, even though there is nothing left needing a human decision.
+            print(
+                f"enrich review: nothing to review ({excluded_by_blacklist} tag(s) excluded by "
+                "the blacklist)"
+            )
+        else:
+            print("enrich review: nothing to review yet (run enrich scan + enrich cluster first).")
+            return
 
     f_rows = face_rows(clusters, noise, prior_faces)
-    t_rows = tag_rows(tag_items, _read_prior_tags(workdir / "tags.csv"))
+    t_rows = tag_rows(tag_items, _read_prior_tags(workdir / "tags.csv")) + blacklist_rows(
+        sorted(blacklist)
+    )
     write_faces_csv(workdir / "faces.csv", f_rows)
     write_tags_csv(workdir / "tags.csv", t_rows)
 
@@ -143,7 +163,7 @@ def cmd_enrich_review(conn, workdir, run_id, log_fh, args, cfg):
     people_payload = build_people_payload(
         clusters, noise, f_rows, persons, wk, cfg.enrich_cluster_prob_floor
     )
-    tags_payload = build_tags_payload(tag_items + auto_items, t_rows, wk)
+    tags_payload = build_tags_payload(tag_items + auto_items, t_rows, wk, sorted(blacklist))
     html_path = workdir / "enrich_review.html"
     html_path.write_text(render_page(people_payload, tags_payload), encoding="utf-8")
 

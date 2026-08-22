@@ -5,6 +5,7 @@ import json
 from photoflow.enrich.page import (
     FACE_COLUMNS,
     TAG_COLUMNS,
+    blacklist_rows,
     build_people_payload,
     build_tags_payload,
     face_is_applied,
@@ -208,3 +209,44 @@ def test_render_page_has_name_autocomplete_and_ignore_cluster():
     assert 'list="persons"' in html and "<datalist" in html  # native autocomplete
     assert "addPersonOption" in html  # names typed this session feed the suggestions
     assert "clusterDismissed" in html and "not interested" in html  # ignore-whole-cluster control
+
+
+def test_blacklist_rows_are_wildcard_reject_rows():
+    rows = blacklist_rows(["person", "document"])
+    assert [r["file_id"] for r in rows] == ["*", "*"]
+    assert all(list(r.keys()) == TAG_COLUMNS for r in rows)
+    assert {r["tag"] for r in rows} == {"person", "document"}
+    assert all(r["decision"] == "reject" for r in rows)
+
+
+def test_tags_payload_carries_the_blacklist_and_page_seeds_it():
+    # R5: the JS Set was seeded only from localStorage, so a blacklist saved on one machine
+    # (or after clearing site data) silently came back as "apply this tag everywhere".
+    payload = build_tags_payload([], [], workdir_key="W", blacklist=["person"])
+    assert payload["blacklist"] == ["person"]
+    html = render_page(
+        build_people_payload(CLUSTERS, NOISE, face_rows(CLUSTERS, NOISE, {}), [], "W", 0.5),
+        payload,
+    )
+    assert "TAGS.blacklist" in html  # the Set is seeded from the payload, not just storage
+    assert '"person"' in html
+
+
+def test_page_persists_blacklist_add_remove_tombstones_not_the_raw_set():
+    """R5 follow-up: a raw Set snapshot in localStorage can't distinguish "matches the DB
+    payload" from "user removed a payload entry", so a local un-blacklist silently reverted on
+    reload. The page must track add/remove tombstones instead. No JS harness exists for this
+    page, so pin the mechanism via the rendered template source."""
+    html = render_page(
+        build_people_payload(CLUSTERS, NOISE, face_rows(CLUSTERS, NOISE, {}), [], "W", 0.5),
+        build_tags_payload([], tag_rows([], {}), workdir_key="W", blacklist=["person"]),
+    )
+    assert "blacklistAdded" in html and "blacklistRemoved" in html
+    # both directions of the tombstone are wired into persist() (not just declared)
+    assert "blacklistAdded:[...blacklistAdded]" in html
+    assert "blacklistRemoved:[...blacklistRemoved]" in html
+    # loading applies additions then removals on top of the DB-backed payload
+    assert "blacklistAdded.add(t)" in html and "blacklistRemoved.add(t)" in html
+    assert "blacklist.delete(t)" in html
+    # the raw Set is no longer round-tripped directly through storage
+    assert "blacklist:[...blacklist]" not in html

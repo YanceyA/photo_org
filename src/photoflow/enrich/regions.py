@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from photoflow.exiftool import KeywordSets
+
 Bbox = tuple[float, float, float, float]  # (x1, y1, x2, y2) pixel top-left + bottom-right
 
 
@@ -69,25 +71,52 @@ def region_argfile_lines(img_w: int, img_h: int, regions: Iterable[tuple[str, Bb
 
 
 def keyword_argfile_lines(
-    existing: Iterable[str],
+    existing: KeywordSets | Iterable[str],
     tags: Iterable[str],
     people: Iterable[str],
     *,
     prefix: str = "People",
     iptc: bool = True,
+    owned_people: Iterable[str] = (),
 ) -> list[str]:
     """Idempotent read-union-replace argfile lines for keywords + people.
 
-    `existing` is the file's CURRENT dc:subject (read just before applying) so user-added
-    keywords and photoflow's provenance folder keywords are preserved: the written set is
-    always a superset of what was there. Each list tag is cleared (`-TAG=`) then re-written
-    so re-applying the same data yields the same set instead of duplicating entries.
+    `existing` is what the file carries right now (a KeywordSets from read_keywords, or a
+    plain set of dc:Subject values for callers that only have those). dc:Subject is a pure
+    UNION so user keywords and photoflow's provenance folder keywords are never lost.
 
-    People are additionally written as Iptc4xmpExt:PersonInImage and (when `prefix`) as a
-    `<prefix>|<name>` lr:HierarchicalSubject, which is what Immich/digiKam key on.
+    The two people-shaped lists are trickier, because other tools write into them too, so
+    both apply the SAME ownership rule: an entry naming somebody photoflow owns
+    (`owned_people` = every row of the persons table) is ours to replace; every other entry
+    is foreign and is preserved verbatim.
+      * Iptc4xmpExt:PersonInImage - compared by bare name.
+      * lr:HierarchicalSubject - only `<prefix>|<owned name>` counts as ours. Matching on the
+        `<prefix>|` branch alone would be wrong: digiKam's people root IS "People", so a
+        `People|Grandma` it wrote would be deleted while `PersonInImage=Grandma` survived,
+        leaving the two lists contradicting each other.
+
+    Ownership is global, not per-file: a name photoflow owns from OTHER photos is stripped
+    from a file where it assigns nobody. That is the intended "we un-tagged this person"
+    behaviour, and the price is that any future code path deleting a persons row must first
+    strip that name from the affected files - once the row is gone the name reads as foreign
+    and becomes unremovable. `enrich merge` (DELETE FROM persons) is today's only deleter, so
+    it is the one that owes the files a keyword_remove_argfile_lines pass.
+
+    Each list is cleared (`-TAG=`) then rewritten so re-applying yields the same set instead
+    of duplicating entries. A list whose resulting set is identical to what's already there
+    is left completely untouched, so a tags-only file never gets a stray clear-and-rewrite
+    of somebody else's hierarchy.
     """
+    if isinstance(existing, KeywordSets):
+        ex_subject = set(existing.subject)
+        ex_hier = set(existing.hierarchical)
+        ex_persons = set(existing.persons)
+    else:  # back-compat: a bare iterable of dc:Subject values
+        ex_subject, ex_hier, ex_persons = set(existing or ()), set(), set()
+
     people = sorted(set(people))
-    subjects = sorted(set(existing) | set(tags) | set(people))
+    owned = set(owned_people)
+    subjects = sorted(ex_subject | set(tags) | set(people))
 
     lines: list[str] = ["-XMP-dc:Subject="]
     lines += [f"-XMP-dc:Subject={s}" for s in subjects]
@@ -96,13 +125,25 @@ def keyword_argfile_lines(
         lines.append("-IPTC:Keywords=")
         lines += [f"-IPTC:Keywords={s}" for s in subjects]
 
-    if people:
-        lines.append("-XMP-iptcExt:PersonInImage=")
-        lines += [f"-XMP-iptcExt:PersonInImage={p}" for p in people]
-        if prefix:
-            lines.append("-XMP-lr:HierarchicalSubject=")
-            lines += [f"-XMP-lr:HierarchicalSubject={prefix}|{p}" for p in people]
+    if prefix:
+        ours = {f"{prefix}|{n}" for n in owned}
+        new_hier = (ex_hier - ours) | {f"{prefix}|{p}" for p in people}
+    else:
+        new_hier = set(ex_hier)
+    lines += _replace_list_lines("-XMP-lr:HierarchicalSubject", ex_hier, new_hier)
+
+    new_persons = (ex_persons - owned) | set(people)
+    lines += _replace_list_lines("-XMP-iptcExt:PersonInImage", ex_persons, new_persons)
     return lines
+
+
+def _replace_list_lines(tag: str, before: set[str], after: set[str]) -> list[str]:
+    """Clear-then-rewrite lines for one list tag; nothing at all when there's no change to make."""
+    if after == before:  # a tags-only file must not touch somebody else's list at all
+        return []
+    if not after:  # everything in it was ours and is gone -> clear it for real
+        return [f"{tag}="]
+    return [f"{tag}="] + [f"{tag}={v}" for v in sorted(after)]
 
 
 def keyword_remove_argfile_lines(
