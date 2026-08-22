@@ -226,6 +226,22 @@ Known follow-ups from the 2026-08 review pass:
     writes local time into `mvhd` will have its date shifted by the zone
     offset. Worth a spot-check if video dates look off by a fixed number of
     hours.
+15. `enrich merge` strips the alias from Subject/Keywords/PersonInImage/
+    HierarchicalSubject but not from MWG `RegionName`; normally self-heals on
+    the next `enrich apply` (region struct is rewritten) unless
+    `write_mwg_regions` is off or a face bbox fails to parse.
+16. `enrich status` does not yet report the new durable state (blacklisted
+    tag count, files skipped after 3 model errors, files pending apply).
+17. Running `enrich review` before `enrich apply` regenerates `tags.csv` from
+    the DB and discards a page-saved-but-not-yet-applied blacklist change;
+    worth a warning in the review output.
+18. `read_keywords` skips a file whose whole record is missing (R1), but a
+    record that is present with one malformed list (e.g. HierarchicalSubject)
+    is treated as "list absent" and that list is rewritten with only our
+    entries.
+19. `apply`'s durable `error` status has no CLI reset; a transient lock (AV
+    scanner) permanently sidelines a file until the row is cleared by hand
+    (see 11).
 
 ## 9. Acceptance criteria for the refactor
 
