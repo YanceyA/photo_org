@@ -9,13 +9,14 @@ already-written library files, and deletes the empty alias rows.
 Ordering matters: `enrich apply` only ever removes a name from PersonInImage /
 HierarchicalSubject while that name still has a `persons` row (a name photoflow does not
 own is foreign and is preserved forever - H11). So the strip must happen BEFORE the alias
-row is deleted, and an alias whose strip failed keeps its row so a later run can still
-finish the job.
+row is deleted, and an alias whose strip failed keeps its row - and its faces - so a later
+run can still finish the job.
 """
 
 from __future__ import annotations
 
 import csv
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -24,8 +25,17 @@ from photoflow.enrich.regions import keyword_remove_argfile_lines
 from photoflow.exiftool import exiftool_apply_argfile, exiftool_available
 from photoflow.xmp import EMBED_EXT
 
-# Per-file strip failures printed in full before collapsing to a "... and N more" line.
+# -execute blocks per exiftool process, mirroring enrich apply's WRITE_BATCH: a 20k-file
+# alias must not become one giant argfile, and a failed chunk only costs 100 retries.
+STRIP_BATCH = 100
+
+# Per-file strip failures printed in full (per RUN, across aliases) before collapsing to a
+# "... and N more" line.
 MAX_FAILURE_REPORTS = 10
+
+# config.py's default. The files on disk may have been written under a different
+# photoflow.toml than the one loaded today (see _removal_lines).
+DEFAULT_PEOPLE_PREFIX = "People"
 
 
 def _person_id(conn, name: str) -> int | None:
@@ -33,8 +43,25 @@ def _person_id(conn, name: str) -> int | None:
     return row["id"] if row else None
 
 
+def _removal_lines(alias: str, cfg) -> list[str]:
+    """Every place the old name could be hiding - deliberately ignoring today's config.
+
+    A file was written under whatever photoflow.toml was loaded THEN: IPTC mirroring may
+    have been on since, or the hierarchy prefix renamed. Honouring only the current config
+    would leave the alias sitting in the tags the old config wrote, and merge would then
+    delete its persons row - after which the name reads as foreign and nothing can remove
+    it (H11). '-=' on a value that is not present is a free no-op, so ask for all of them.
+    """
+    lines = keyword_remove_argfile_lines(
+        [alias], iptc=True, people_prefix=cfg.people_keyword_prefix
+    )
+    if cfg.people_keyword_prefix != DEFAULT_PEOPLE_PREFIX:
+        lines.append(f"-XMP-lr:HierarchicalSubject-={DEFAULT_PEOPLE_PREFIX}|{alias}")
+    return lines
+
+
 def _strip_alias_keywords(
-    conn, log_fh, run_id, alias: str, touched: dict[int, tuple[str, str]], cfg
+    conn, log_fh, run_id, alias: str, touched: dict[int, tuple[str, str]], cfg, report: dict
 ) -> tuple[set[int], set[int]]:
     """Delete one merged-away name from the library files' keyword lists.
 
@@ -44,27 +71,26 @@ def _strip_alias_keywords(
     strips only the named values and never disturbs other keywords. -P keeps the mtime.
 
     Returns ({file_id actually stripped}, {file_id that could not be stripped}). Like apply,
-    a failed batch is re-run one block at a time: exiftool keeps going after a bad file, so a
-    non-zero rc only means "at least one block failed". A file in neither set had nothing to
-    strip (a sidecar apply has never created) and is treated as done.
+    a failed CHUNK is re-run one block at a time: exiftool keeps going after a bad file, so
+    a non-zero rc only means "at least one block in that chunk failed". A file in neither
+    set had nothing to strip (a sidecar apply has never created) and is treated as done.
+    `report` carries the run-wide printed-failure budget.
     """
-    remove = keyword_remove_argfile_lines(
-        [alias], iptc=cfg.write_iptc_keywords, people_prefix=cfg.people_keyword_prefix
-    )
+    remove = _removal_lines(alias, cfg)
     failed: set[int] = set()
-    reported = 0
 
-    def _fail(file_id: int, dest: str, detail: str, extra: list[str] = ()) -> None:
-        nonlocal reported
+    def _fail(file_id: int, dest: str, detail: str, extra: Sequence[str] = ()) -> None:
         failed.add(file_id)
         log_action(
             conn, log_fh, run_id, file_id, "enrich_merge_strip_error", f"{alias}: {dest}: {detail}"
         )
-        if reported < MAX_FAILURE_REPORTS:
-            reported += 1
+        if report["shown"] < MAX_FAILURE_REPORTS:
+            report["shown"] += 1
             print(f"  FAILED to strip '{alias}': {dest} ({detail})")
             for err in extra[:3]:
                 print(f"    {err}")
+        else:
+            report["hidden"] += 1
 
     blocks: list[tuple[int, str, list[str]]] = []  # (file_id, dest, argfile lines)
     for file_id, (dest, ext) in touched.items():
@@ -79,30 +105,27 @@ def _strip_alias_keywords(
             # else: a sidecar apply has never created holds no keywords - nothing to strip.
             continue
         blocks.append((file_id, dest, ["-P", "-overwrite_original", *remove, target, "-execute"]))
-    if not blocks:
-        return set(), failed
 
-    lines: list[str] = []
-    for _fid, _dest, block in blocks:
-        lines += block
-    res = exiftool_apply_argfile(lines)
-    if res.returncode == 0:
-        return {fid for fid, _dest, _block in blocks}, failed
-
-    print(
-        f"  exiftool rc={res.returncode} while stripping '{alias}': retrying its"
-        f" {len(blocks)} file(s) individually to find the bad one(s)..."
-    )
     ok: set[int] = set()
-    for file_id, dest, block in blocks:
-        one = exiftool_apply_argfile(block)
-        if one.returncode == 0:
-            ok.add(file_id)
+    for i in range(0, len(blocks), STRIP_BATCH):
+        chunk = blocks[i : i + STRIP_BATCH]
+        lines: list[str] = []
+        for _fid, _dest, block in chunk:
+            lines += block
+        res = exiftool_apply_argfile(lines)
+        if res.returncode == 0:
+            ok |= {fid for fid, _dest, _block in chunk}
             continue
-        err_lines = (one.stderr or "").strip().splitlines()
-        _fail(file_id, dest, f"rc={one.returncode}", err_lines)
-    if len(failed) > reported:
-        print(f"  ... and {len(failed) - reported} more strip failure(s) not shown.")
+        print(
+            f"  exiftool rc={res.returncode} while stripping '{alias}': retrying"
+            f" {len(chunk)} file(s) individually to find the bad one(s)..."
+        )
+        for file_id, dest, block in chunk:
+            one = exiftool_apply_argfile(block)
+            if one.returncode == 0:
+                ok.add(file_id)
+                continue
+            _fail(file_id, dest, f"rc={one.returncode}", (one.stderr or "").strip().splitlines())
     return ok, failed
 
 
@@ -135,7 +158,8 @@ def _rewrite_faces_csv(path, mapping: dict[str, str]) -> int:
 
 def cmd_enrich_merge(conn, workdir, run_id, log_fh, args, cfg):
     canonical = (args.canonical or "").strip()
-    aliases = [(a or "").strip() for a in getattr(args, "aliases", [])]
+    # dict.fromkeys: dedupe while keeping the order the user typed them in
+    aliases = list(dict.fromkeys((a or "").strip() for a in getattr(args, "aliases", [])))
     if not canonical:
         print("enrich merge: canonical name is empty.")
         return
@@ -162,7 +186,10 @@ def cmd_enrich_merge(conn, workdir, run_id, log_fh, args, cfg):
     plans: list[tuple[str, int, dict[int, tuple[str, str]]]] = []
     for alias in aliases:
         aid = _person_id(conn, alias)
-        if aid is None or aid == cid:  # unknown name, or it's the canonical row itself
+        if aid is None:  # a typo in the merge command itself is worth saying out loud
+            print(f"enrich merge: no such person: '{alias}' (skipped)")
+            continue
+        if aid == cid:  # it's the canonical row itself
             continue
         touched: dict[int, tuple[str, str]] = {}  # file_id -> (dest_path, ext)
         for row in conn.execute(
@@ -177,16 +204,20 @@ def cmd_enrich_merge(conn, workdir, run_id, log_fh, args, cfg):
     # Pass 2: strip the old name from the files while the alias is still owned.
     stripped_ids: set[int] = set()
     failures: dict[str, set[int]] = {}
+    report = {"shown": 0, "hidden": 0}  # run-wide printed-failure budget
     for alias, _aid, touched in plans:
         if not touched:
             continue
-        ok, failed = _strip_alias_keywords(conn, log_fh, run_id, alias, touched, cfg)
+        ok, failed = _strip_alias_keywords(conn, log_fh, run_id, alias, touched, cfg, report)
         stripped_ids |= ok  # distinct: one file can carry two aliases
         if failed:
             failures[alias] = failed
+    if report["hidden"]:
+        print(f"  ... and {report['hidden']} more strip failure(s) not shown.")
 
     # Pass 3: repoint the faces of the stripped files, queue their rewrite, retire the alias.
     moved: list[tuple[str, int]] = []
+    folded: list[str] = []  # aliases that are completely gone from the files AND the DB
     kept: list[tuple[str, int, int]] = []  # alias, faces left behind, files that failed
     for alias, aid, touched in plans:
         bad = failures.get(alias, set())
@@ -216,11 +247,15 @@ def cmd_enrich_merge(conn, workdir, run_id, log_fh, args, cfg):
             kept.append((alias, len(stay), len(bad)))
         else:
             conn.execute("DELETE FROM persons WHERE id=?", (aid,))
+            folded.append(alias)
         moved.append((alias, n))
     conn.commit()
-    csv_fixed = _rewrite_faces_csv(workdir / "faces.csv", {a: canonical for a, _n in moved})
+    # Only fully folded aliases: a kept alias still owns those faces, so rewriting its CSV
+    # rows to the canonical name would make the overlay lie about who they are.
+    csv_fixed = _rewrite_faces_csv(workdir / "faces.csv", {a: canonical for a in folded})
 
     total = sum(n for _a, n in moved)
+    n_failed = len(set().union(*failures.values())) if failures else 0
     log_action(
         conn,
         log_fh,
@@ -228,9 +263,7 @@ def cmd_enrich_merge(conn, workdir, run_id, log_fh, args, cfg):
         0,
         "enrich_merge",
         f"canonical={canonical} aliases={len(moved)} faces_moved={total} "
-        f"files_stripped={len(stripped_ids)} "
-        f"strip_failed={len(set().union(*failures.values()) if failures else set())} "
-        f"csv_rows={csv_fixed}",
+        f"files_stripped={len(stripped_ids)} strip_failed={n_failed} csv_rows={csv_fixed}",
     )
     conn.commit()
     print(f"enrich merge: folded {len(moved)} alias(es) into '{canonical}', moved {total} face(s).")
