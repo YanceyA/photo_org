@@ -668,6 +668,21 @@ def test_apply_dry_run_mutates_nothing(tmp_path, monkeypatch):
     # R2: the dry run used to durably commit the step-1 person upsert + faces.person_id,
     # hiding those clusters from the next `enrich review`.
     conn, workdir, lib, ids = _one_face_file(tmp_path)
+    # R5: a dry run must not persist the CSV blacklist into tag_blacklist either.
+    _write_csv(
+        workdir / "tags.csv",
+        ["file_id", "tag", "source", "score", "suggestion", "decision"],
+        [
+            {
+                "file_id": "*",
+                "tag": "person",
+                "source": "",
+                "score": "",
+                "suggestion": "auto",
+                "decision": "reject",
+            }
+        ],
+    )
     monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
     monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
     monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool({}))
@@ -680,6 +695,7 @@ def test_apply_dry_run_mutates_nothing(tmp_path, monkeypatch):
         == 0
     )
     assert conn.execute("SELECT COUNT(*) c FROM enrich_state").fetchone()["c"] == 0
+    assert conn.execute("SELECT COUNT(*) c FROM tag_blacklist").fetchone()["c"] == 0
 
 
 def test_apply_skips_files_whose_keyword_read_failed(tmp_path, monkeypatch, capsys):
@@ -1601,3 +1617,116 @@ def test_status_runs(tmp_path, capsys):
     _run(estatus.cmd_enrich_status, conn, workdir)
     out = capsys.readouterr().out.lower()
     assert "face" in out and "tag" in out
+
+
+# --------------------------------------------------------------- durable tag blacklist (R5)
+
+
+def test_apply_persists_the_csv_blacklist_into_the_db(tmp_path, monkeypatch):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    conn.execute(
+        "INSERT INTO tags(file_id, tag, source, score, status) VALUES (?,?,?,?,?)",
+        (fid, "person", "clip", 0.9, "auto"),
+    )
+    conn.commit()
+    _write_csv(workdir / "faces.csv", FACE_COLS, [])
+    _write_csv(
+        workdir / "tags.csv",
+        ["file_id", "tag", "source", "score", "suggestion", "decision"],
+        [
+            {
+                "file_id": "*",
+                "tag": "person",
+                "source": "",
+                "score": "",
+                "suggestion": "auto",
+                "decision": "reject",
+            }
+        ],
+    )
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool({}))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    assert [r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")] == ["person"]
+
+
+def test_apply_never_writes_a_db_blacklisted_tag(tmp_path, monkeypatch):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    conn.execute("INSERT INTO tag_blacklist(tag, ts) VALUES ('person','')")
+    conn.execute(
+        "INSERT INTO tags(file_id, tag, source, score, status) VALUES (?,?,?,?,?)",
+        (fid, "person", "clip", 0.9, "auto"),
+    )
+    conn.execute(
+        "INSERT INTO tags(file_id, tag, source, score, status) VALUES (?,?,?,?,?)",
+        (fid, "beach", "clip", 0.9, "auto"),
+    )
+    conn.commit()
+    _write_csv(workdir / "faces.csv", FACE_COLS, [])
+    _write_csv(
+        workdir / "tags.csv", ["file_id", "tag", "source", "score", "suggestion", "decision"], []
+    )
+    captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    assert "-XMP-dc:Subject=beach" in captured["lines"]
+    assert "-XMP-dc:Subject=person" not in captured["lines"]
+
+
+def test_review_carries_the_blacklist_forward(tmp_path):
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    conn.execute("INSERT INTO tag_blacklist(tag, ts) VALUES ('person','')")
+    conn.execute(
+        "INSERT INTO tags(file_id, tag, source, score, status) VALUES (?,?,?,?,?)",
+        (fid, "person", "clip", 0.4, "review"),
+    )
+    conn.execute(
+        "INSERT INTO tags(file_id, tag, source, score, status) VALUES (?,?,?,?,?)",
+        (fid, "boat", "clip", 0.4, "review"),
+    )
+    conn.commit()
+
+    _run(ereview.cmd_enrich_review, conn, workdir)
+
+    rows = list(csv.DictReader((workdir / "tags.csv").open(encoding="utf-8")))
+    wildcard = [r for r in rows if r["file_id"] == "*"]
+    assert [r["tag"] for r in wildcard] == ["person"]  # re-emitted so the page + apply agree
+    assert all(r["tag"] != "person" for r in rows if r["file_id"] != "*")  # not up for review
+    html = (workdir / "enrich_review.html").read_text(encoding="utf-8")
+    assert "TAGS.blacklist" in html and '"person"' in html
+
+
+# ------------------------------------------------------- scan commit cadence on open failures
+
+
+def test_scan_commits_periodically_even_when_every_file_fails_to_open(
+    tmp_path, monkeypatch, capsys
+):
+    # Coordinator addition (C5 review): COMMIT_EVERY was keyed off n_files, which only
+    # incremented after the enrich_state upsert - a run dominated by unreadable files (every
+    # open_rgb raising) hit `continue` before that and never committed periodically. A plain
+    # sqlite3.Connection won't accept a monkeypatched .commit, so the mid-loop commit is
+    # observed the same way the periodic-progress print is: via its capsys output.
+    conn, workdir, lib, ids = _seed(tmp_path, n=3)
+    monkeypatch.setattr(edeps, "HAVE_FACES", True)
+    monkeypatch.setattr(efaces, "FaceDetector", lambda cfg: FakeDetector(which=0))
+    monkeypatch.setattr(etagger, "build_tagger", lambda cfg, wd: FakeTagger())
+    monkeypatch.setattr(escan, "open_rgb", lambda path: (_ for _ in ()).throw(RuntimeError("bad")))
+    monkeypatch.setattr(escan, "COMMIT_EVERY", 2)
+
+    _run(escan.cmd_enrich_scan, conn, workdir)
+
+    out = capsys.readouterr().out
+    assert "attempted 2/3" in out  # mid-loop progress print fired -> the commit did too
+    errors = [r["errors"] for r in conn.execute("SELECT errors FROM enrich_state ORDER BY file_id")]
+    assert errors == [1, 1, 1]

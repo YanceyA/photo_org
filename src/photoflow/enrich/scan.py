@@ -61,9 +61,11 @@ def _store_faces(conn, file_id: int, im, dets, cfg, faces_dir) -> int:
     return n
 
 
-def _store_tags(conn, file_id: int, items, tagger, cfg) -> int:
+def _store_tags(conn, file_id: int, items, tagger, cfg, blacklist) -> int:
     n = 0
     for tag, score in items:
+        if tag in blacklist:
+            continue
         st = classify_tag(score, cfg.tag_score_accept, cfg.tag_score_review)
         if st is None:
             continue
@@ -109,69 +111,77 @@ def cmd_enrich_scan(conn, workdir, run_id, log_fh, args, cfg):
         print("enrich scan: install photoflow[enrich] to detect faces or tag content.")
         return
 
+    blacklist = {r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")}
+
     faces_dir = workdir / "faces"
     faces_dir.mkdir(exist_ok=True)
     total = len(rows)
     print(f"enrich scan: {total} files to process")
     n_files = n_faces = n_tags = n_errors = 0
+    n_attempted = 0
     t0 = time.monotonic()
 
     for r in rows:
+        # Counted here, before open_rgb, so a run dominated by unreadable files still commits
+        # and prints progress periodically instead of never hitting the COMMIT_EVERY check below
+        # (which used to be keyed off n_files, only incremented after a file fully succeeded).
+        n_attempted += 1
         try:
             im = open_rgb(r["dest_path"])
         except Exception as e:
             log_action(conn, log_fh, run_id, r["id"], "enrich_open_error", str(e)[:200])
             _bump_errors(conn, r["id"])
             n_errors += 1
-            continue
+        else:
+            faces_ok = detector is None or bool(r["fd"])
+            tags_ok = tagger is None or bool(r["td"])
+            errored = False
 
-        faces_ok = detector is None or bool(r["fd"])
-        tags_ok = tagger is None or bool(r["td"])
-        errored = False
+            if detector is not None and not r["fd"]:
+                import numpy as np
 
-        if detector is not None and not r["fd"]:
-            import numpy as np
+                try:
+                    # materialize inside the guard: a generator would raise later, outside it
+                    dets = list(detector.detect(np.asarray(im)))
+                except Exception as e:
+                    log_action(conn, log_fh, run_id, r["id"], "enrich_detect_error", str(e)[:200])
+                    errored = True
+                else:
+                    n_faces += _store_faces(conn, r["id"], im, dets, cfg, faces_dir)
+                    faces_ok = True
 
-            try:
-                # materialize inside the guard: a generator would raise later, outside it
-                dets = list(detector.detect(np.asarray(im)))
-            except Exception as e:
-                log_action(conn, log_fh, run_id, r["id"], "enrich_detect_error", str(e)[:200])
-                errored = True
-            else:
-                n_faces += _store_faces(conn, r["id"], im, dets, cfg, faces_dir)
-                faces_ok = True
+            if tagger is not None and not r["td"]:
+                try:
+                    items = list(tagger.tag(im))
+                except Exception as e:
+                    log_action(conn, log_fh, run_id, r["id"], "enrich_tag_error", str(e)[:200])
+                    errored = True
+                else:
+                    n_tags += _store_tags(conn, r["id"], items, tagger, cfg, blacklist)
+                    tags_ok = True
 
-        if tagger is not None and not r["td"]:
-            try:
-                items = list(tagger.tag(im))
-            except Exception as e:
-                log_action(conn, log_fh, run_id, r["id"], "enrich_tag_error", str(e)[:200])
-                errored = True
-            else:
-                n_tags += _store_tags(conn, r["id"], items, tagger, cfg)
-                tags_ok = True
+            if errored:
+                n_errors += 1
+                _bump_errors(conn, r["id"])
 
-        if errored:
-            n_errors += 1
-            _bump_errors(conn, r["id"])
+            conn.execute(
+                "INSERT INTO enrich_state(file_id, faces_done, tags_done, ts) VALUES (?,?,?,?) "
+                "ON CONFLICT(file_id) DO UPDATE SET"
+                " faces_done=MAX(faces_done, excluded.faces_done),"
+                " tags_done=MAX(tags_done, excluded.tags_done), ts=excluded.ts",
+                (
+                    r["id"],
+                    1 if (detector is not None and faces_ok) else 0,
+                    1 if (tagger is not None and tags_ok) else 0,
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+            n_files += 1
 
-        conn.execute(
-            "INSERT INTO enrich_state(file_id, faces_done, tags_done, ts) VALUES (?,?,?,?) "
-            "ON CONFLICT(file_id) DO UPDATE SET faces_done=MAX(faces_done, excluded.faces_done),"
-            " tags_done=MAX(tags_done, excluded.tags_done), ts=excluded.ts",
-            (
-                r["id"],
-                1 if (detector is not None and faces_ok) else 0,
-                1 if (tagger is not None and tags_ok) else 0,
-                datetime.now().isoformat(timespec="seconds"),
-            ),
-        )
-        n_files += 1
-        if n_files % COMMIT_EVERY == 0:
+        if n_attempted % COMMIT_EVERY == 0:
             conn.commit()
-            rate = n_files / max(time.monotonic() - t0, 1e-6) * 60
-            print(f"  enriched {n_files}/{total} ({rate:.1f} files/min)", flush=True)
+            rate = n_attempted / max(time.monotonic() - t0, 1e-6) * 60
+            print(f"  attempted {n_attempted}/{total} ({rate:.1f} files/min)", flush=True)
 
     conn.commit()
     log_action(

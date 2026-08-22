@@ -107,6 +107,11 @@ CREATE TABLE IF NOT EXISTS enrich_state (   -- incremental skip, like scan's siz
     errors INTEGER DEFAULT 0,  -- consecutive model failures; 3 strikes and scan skips the file
     ts TEXT
 );
+
+CREATE TABLE IF NOT EXISTS tag_blacklist (  -- durable "never write this tag" decisions (R5)
+    tag TEXT PRIMARY KEY,
+    ts TEXT
+);
 """
 
 

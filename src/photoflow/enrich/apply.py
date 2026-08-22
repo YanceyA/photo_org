@@ -121,21 +121,26 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
                     "UPDATE faces SET ignored=1, cluster_id=NULL, cluster_prob=NULL WHERE id=?",
                     (int(m["face_id"]),),
                 )
-    # R2: in dry mode NOTHING above is committed - the whole command runs inside one
-    # transaction that is rolled back at the end, so a dry run can't hide clusters from the
-    # next `enrich review`.
-    if not dry:
-        conn.commit()
-
-    # 2. tag decision overlay: blacklist wildcards + per-(file,tag) review decisions
-    blacklist = {
+    # 2. tag decision overlay: blacklist wildcards (durable in tag_blacklist + this run's CSV
+    # rows) and per-(file,tag) review decisions.
+    csv_blacklist = {
         r["tag"] for r in tag_csv if str(r.get("file_id")) == "*" and r.get("decision") == "reject"
     }
+    db_blacklist = {r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")}
+    for t in sorted(csv_blacklist - db_blacklist):
+        conn.execute("INSERT OR IGNORE INTO tag_blacklist(tag, ts) VALUES (?,?)", (t, now))
+    blacklist = csv_blacklist | db_blacklist
     review_dec = {
         (str(r["file_id"]), r["tag"]): (r.get("decision") or "")
         for r in tag_csv
         if str(r.get("file_id")) != "*"
     }
+
+    # R2: in dry mode NOTHING above is committed - the whole command runs inside one
+    # transaction that is rolled back at the end, so a dry run can't hide clusters (or new
+    # blacklist entries) from the next `enrich review`.
+    if not dry:
+        conn.commit()
 
     # 3. candidate files: any assigned-person face or any tag. EXISTS subqueries (not an
     # IN(...) list) so this never trips SQLite's 32766-variable limit on a large library.

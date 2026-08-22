@@ -5,6 +5,7 @@ import json
 from photoflow.enrich.page import (
     FACE_COLUMNS,
     TAG_COLUMNS,
+    blacklist_rows,
     build_people_payload,
     build_tags_payload,
     face_is_applied,
@@ -208,3 +209,24 @@ def test_render_page_has_name_autocomplete_and_ignore_cluster():
     assert 'list="persons"' in html and "<datalist" in html  # native autocomplete
     assert "addPersonOption" in html  # names typed this session feed the suggestions
     assert "clusterDismissed" in html and "not interested" in html  # ignore-whole-cluster control
+
+
+def test_blacklist_rows_are_wildcard_reject_rows():
+    rows = blacklist_rows(["person", "document"])
+    assert [r["file_id"] for r in rows] == ["*", "*"]
+    assert all(list(r.keys()) == TAG_COLUMNS for r in rows)
+    assert {r["tag"] for r in rows} == {"person", "document"}
+    assert all(r["decision"] == "reject" for r in rows)
+
+
+def test_tags_payload_carries_the_blacklist_and_page_seeds_it():
+    # R5: the JS Set was seeded only from localStorage, so a blacklist saved on one machine
+    # (or after clearing site data) silently came back as "apply this tag everywhere".
+    payload = build_tags_payload([], [], workdir_key="W", blacklist=["person"])
+    assert payload["blacklist"] == ["person"]
+    html = render_page(
+        build_people_payload(CLUSTERS, NOISE, face_rows(CLUSTERS, NOISE, {}), [], "W", 0.5),
+        payload,
+    )
+    assert "TAGS.blacklist" in html  # the Set is seeded from the payload, not just storage
+    assert '"person"' in html
