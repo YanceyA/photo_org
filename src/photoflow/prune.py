@@ -30,6 +30,17 @@ def _free_path(p: Path) -> Path:
 def cmd_prune_sidecars(conn, workdir, run_id, log_fh, args, cfg):
     out_root = Path(args.out).expanduser().resolve()
     pruned_root = workdir / "pruned"
+    try:
+        pruned_root.resolve().relative_to(out_root)
+    except ValueError:
+        pass
+    else:
+        print(
+            f"WARNING: --workdir is inside --out, so pruned files stay under the "
+            f"library root ({pruned_root}); Immich/backups will still see them. "
+            f"Consider a workdir outside the library."
+        )
+
     rows = conn.execute(
         "SELECT id, dest_path FROM files "
         "WHERE status='copied' AND kind='sidecar' AND dest_path IS NOT NULL"
@@ -132,8 +143,8 @@ def cmd_prune_sidecars(conn, workdir, run_id, log_fh, args, cfg):
     total_cleared = pruned + cleared_only
     verb = "would prune" if args.dry_run else "pruned"
     print(
-        f"{verb} {total_cleared} sidecar(s) ({cleared_only} cleared, files already gone); "
-        f"{missing} already gone, {failed} failed, {outside} outside --out."
+        f"{verb} {total_cleared} sidecar(s): {pruned} moved, {cleared_only} cleared "
+        f"(files already gone); {failed} failed, {outside} outside --out."
     )
     if not args.dry_run and pruned:
         print(f"moved into {pruned_root} (nothing was deleted).")

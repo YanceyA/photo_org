@@ -23,7 +23,12 @@ def _copy_atomic(src: str, dest: Path) -> None:
         shutil.copy2(src, tmp)
         os.replace(tmp, dest)
     finally:
-        tmp.unlink(missing_ok=True)
+        # Best-effort: a cleanup failure here (e.g. an AV scanner holding the .part
+        # open) must never mask the original copy error/success being propagated.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _flush_xmp(conn, log_fh, run_id, xmp_args: list[str]) -> None:
@@ -38,9 +43,13 @@ def _flush_xmp(conn, log_fh, run_id, xmp_args: list[str]) -> None:
     print(f"  embedding XMP provenance for {xmp_args.count('-execute')} files (exiftool)...")
     res = exiftool_apply_argfile(xmp_args)
     if res.returncode != 0:
-        head = " / ".join(res.stderr.strip().splitlines()[:3])
+        stderr = res.stderr.strip()
+        head = " / ".join(stderr.splitlines()[:3])
         print(f"exiftool reported errors: {head}")
-        log_action(conn, log_fh, run_id, 0, "xmp_embed_errors", f"rc={res.returncode} {head}")
+        # exiftool names the failing file on each stderr line, so a truncated head
+        # would discard the only information needed to find/repair the culprit -
+        # log the full stderr here even though only the head is printed above.
+        log_action(conn, log_fh, run_id, 0, "xmp_embed_errors", f"rc={res.returncode} {stderr}")
     xmp_args.clear()
 
 

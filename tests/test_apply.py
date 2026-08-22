@@ -14,7 +14,9 @@ from photoflow import apply as apply_mod
 from photoflow.apply import cmd_apply
 from photoflow.config import load_config
 from photoflow.db import new_run, open_db
+from photoflow.exiftool import ExiftoolResult
 from photoflow.naming import dest_for
+from photoflow.prune import cmd_prune_sidecars
 
 pytestmark = pytest.mark.exiftool
 
@@ -148,3 +150,53 @@ def test_copy_sidecars_true_restores_old_behaviour(photo_fixture: Path, tmp_path
     assert [n for n in names if n.endswith(".thm")]
     statuses = {r["status"] for r in q(work, "SELECT status FROM files WHERE kind='sidecar'")}
     assert statuses == {"copied"}
+
+
+def test_xmp_embed_error_logs_full_stderr(photo_fixture: Path, tmp_path: Path, monkeypatch):
+    """The printed head is truncated to 3 lines, but exiftool names the failing file on
+    every stderr line, so the audit detail must keep the full text to be repairable."""
+    work, lib = tmp_path / "work", tmp_path / "library"
+    pf(work, "scan", str(photo_fixture))
+    pf(work, "plan")
+    stderr = "Error: File not found - a.jpg\nError: x - b.jpg\nError: y - c.jpg\nError: z - d.jpg"
+    monkeypatch.setattr(
+        apply_mod, "exiftool_apply_argfile", lambda args: ExiftoolResult(1, stderr, "")
+    )
+    run_apply(work, lib)
+
+    rows = q(work, "SELECT detail FROM actions WHERE action='xmp_embed_errors'")
+    assert rows and "d.jpg" in rows[0]["detail"]
+    copied = q(work, "SELECT status FROM files WHERE status='copied'")
+    assert copied  # the exiftool failure never rolled back the copy
+
+
+def test_sidecar_prune_and_reapply_round_trip(photo_fixture: Path, tmp_path: Path):
+    """copy_sidecars=true -> prune -> plan resets it -> copy_sidecars=false converges."""
+    work, lib = tmp_path / "work", tmp_path / "library"
+    work.mkdir(parents=True)
+    (work / "photoflow.toml").write_text("copy_sidecars = true\n", encoding="utf-8")
+    pf(work, "scan", str(photo_fixture))
+    pf(work, "plan")
+    pf(work, "apply", "--out", str(lib))
+    assert list(lib.rglob("*.thm"))
+
+    conn = open_db(work)
+    run_id = new_run(conn, "prune-sidecars", {})
+    with open(work / "logs" / f"test_{run_id}.jsonl", "a", encoding="utf-8") as fh:
+        cmd_prune_sidecars(conn, work, run_id, fh, Args(lib), load_config(work))
+    conn.commit()
+    conn.close()
+
+    rows = q(work, "SELECT status, dest_path FROM files WHERE ext='.thm'")
+    assert all(r["status"] == "skipped_sidecar" and r["dest_path"] is None for r in rows)
+    assert not list(lib.rglob("*.thm"))
+
+    pf(work, "plan")
+    rows = q(work, "SELECT status FROM files WHERE ext='.thm'")
+    assert all(r["status"] == "planned" for r in rows)  # non-durable: reset by plan
+
+    (work / "photoflow.toml").write_text("copy_sidecars = false\n", encoding="utf-8")
+    pf(work, "apply", "--out", str(lib))
+    rows = q(work, "SELECT status FROM files WHERE ext='.thm'")
+    assert all(r["status"] == "skipped_sidecar" for r in rows)
+    assert not list(lib.rglob("*.thm"))

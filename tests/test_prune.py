@@ -134,7 +134,7 @@ def test_prune_dry_run_reports_missing_files(tmp_path: Path, capsys):
 
     out = capsys.readouterr().out
     assert f"DRY  {dests[1]}" not in out
-    assert "1 already gone" in out
+    assert "1 cleared (files already gone)" in out
     # the other row (still present) is reported normally
     assert f"DRY  {dests[0]}" in out
 
@@ -151,3 +151,18 @@ def test_prune_keeps_sidecar_next_to_a_collision_renamed_file(tmp_path: Path):
     assert renamed.exists()
     assert renamed.read_bytes() == b"thumbnail-bytes"
     assert (pruned_dir / f"{renamed.name}.xmp").exists()
+
+
+def test_prune_warns_when_workdir_is_inside_out(tmp_path: Path, capsys):
+    """--workdir under --out means pruned/ never really leaves the library root."""
+    lib = tmp_path / "lib"
+    work = lib / "photoflow_work"
+    conn = open_db(work)
+    run_id = new_run(conn, "prune-sidecars", {})
+    (work / "logs").mkdir(exist_ok=True)
+    with open(work / "logs" / f"test_{run_id}.jsonl", "a", encoding="utf-8") as fh:
+        cmd_prune_sidecars(conn, work, run_id, fh, Args(lib, dry_run=True), Config())
+
+    out = capsys.readouterr().out
+    assert "WARNING: --workdir is inside --out" in out
+    assert str(work / "pruned") in out
