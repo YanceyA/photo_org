@@ -169,6 +169,28 @@ def test_scan_gives_up_on_a_file_after_three_failures(tmp_path, monkeypatch, cap
     assert "repeated errors" in out
 
 
+def test_scan_resets_the_error_count_when_the_file_finally_succeeds(tmp_path, monkeypatch):
+    # MAX_ERRORS is documented as CONSECUTIVE failures, but nothing cleared the counter: two
+    # transient failures left a file permanently one strike from being skipped for good.
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    conn.execute(
+        "INSERT INTO enrich_state(file_id, faces_done, tags_done, errors, ts) VALUES (?,0,0,2,'')",
+        (ids[0],),
+    )
+    conn.commit()
+    monkeypatch.setattr(edeps, "HAVE_FACES", True)
+    monkeypatch.setattr(efaces, "FaceDetector", lambda cfg: FakeDetector(which=0))
+    monkeypatch.setattr(etagger, "build_tagger", lambda cfg, wd: FakeTagger())
+
+    _run(escan.cmd_enrich_scan, conn, workdir)
+
+    row = conn.execute(
+        "SELECT faces_done, tags_done, errors FROM enrich_state WHERE file_id=?", (ids[0],)
+    ).fetchone()
+    assert row["faces_done"] == 1 and row["tags_done"] == 1
+    assert row["errors"] == 0  # both sides came through -> the strike count starts over
+
+
 # --------------------------------------------------------------------------- cluster
 
 
@@ -786,6 +808,60 @@ def test_apply_retries_a_failed_batch_per_file(tmp_path, monkeypatch, capsys):
         conn.execute("SELECT applied_sig FROM enrich_state WHERE file_id=?", (ids[1],)).fetchone()
         is None
     )
+
+
+def test_apply_commits_each_batch_so_an_interrupted_run_keeps_its_progress(tmp_path, monkeypatch):
+    # Every _mark_applied sat in one transaction until the final commit, so a Ctrl-C part way
+    # through the first post-upgrade run (45k files) threw away ALL applied_sig progress and the
+    # next run rewrote the whole library. Durability is checked from a SECOND connection to the
+    # same DB file - the command's own connection would happily show its uncommitted rows.
+    conn, workdir, lib, ids = _one_face_file(tmp_path, n=2)
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "WRITE_BATCH", 1)  # one file per batch
+
+    calls = {"n": 0}
+
+    def die_on_the_second_batch(lines):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt("user hit Ctrl-C mid-run")
+        return ExiftoolResult(0, "", "")
+
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", die_on_the_second_batch)
+
+    with pytest.raises(KeyboardInterrupt):
+        _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    other = open_db(workdir)  # separate connection: only committed rows are visible
+    try:
+        durable = {
+            r["file_id"]: r["applied_sig"]
+            for r in other.execute("SELECT file_id, applied_sig FROM enrich_state")
+        }
+    finally:
+        other.close()
+    assert len(durable) == 1  # the first batch survived the interrupt
+    fid, sig = next(iter(durable.items()))
+    assert fid in ids and sig
+
+
+def test_apply_reports_csv_rows_whose_face_is_already_named(tmp_path, monkeypatch, capsys):
+    # The R8 guard (a CSV keep row can only grant a FIRST name) was silent, so a user editing
+    # faces.csv to rename someone saw a clean run and no rename.
+    conn, workdir, lib, ids = _one_face_file(tmp_path, person="Deidre Hough")
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool({}))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+    assert "already have a name" not in capsys.readouterr().out  # first run does the naming
+
+    # same CSV replayed: the face now has a person_id, so the keep row is skipped - say so
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+    out = capsys.readouterr().out
+    assert "1 face(s) in faces.csv already have a name" in out
+    assert "enrich merge" in out
 
 
 def test_apply_creates_a_missing_sidecar_target(tmp_path, monkeypatch, capsys):

@@ -176,6 +176,12 @@ def cmd_enrich_scan(conn, workdir, run_id, log_fh, args, cfg):
                     datetime.now().isoformat(timespec="seconds"),
                 ),
             )
+            if faces_ok and tags_ok:
+                # Reset the strike counter. MAX_ERRORS is documented (here and in db.py's
+                # schema) as CONSECUTIVE failures, but nothing ever cleared it: two transient
+                # CUDA OOMs left a file permanently one failure away from being skipped for
+                # good, even after it came through cleanly.
+                conn.execute("UPDATE enrich_state SET errors=0 WHERE file_id=?", (r["id"],))
             n_files += 1
 
         if n_attempted % COMMIT_EVERY == 0:

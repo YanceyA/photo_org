@@ -232,6 +232,28 @@ def test_tags_payload_carries_the_blacklist_and_page_seeds_it():
     assert '"person"' in html
 
 
+def test_page_renders_a_chip_for_a_blacklisted_tag_with_no_auto_summary_entry():
+    """Un-blacklisting has to be reachable from the page. `enrich review` filters blacklisted
+    tags out of BOTH payload sides, so autoSummary never mentions them and the only clickable
+    chip source was empty - the blacklistRemoved tombstone could never be produced. No JS
+    harness exists for this page, so pin the mechanism in the rendered template source."""
+    payload = build_tags_payload([], [], workdir_key="W", blacklist=["person"])
+    assert payload["autoSummary"] == []  # nothing upstream produces a chip for it
+    html = render_page(
+        build_people_payload(CLUSTERS, NOISE, face_rows(CLUSTERS, NOISE, {}), [], "W", 0.5),
+        payload,
+    )
+    # renderAutoSummary draws autoSummary PLUS every blacklist entry it doesn't cover
+    assert "function autoSummaryChips()" in html
+    assert "autoSummaryChips().map" in html
+    assert "[...blacklist].filter(t=>!seen.has(t))" in html
+    assert "blOnly:true" in html and '"blacklisted"' in html
+    # the extra chips are plain .chip nodes, so the existing #autosummary click handler
+    # (delete from the Set + blacklistRemoved tombstone) applies to them unchanged
+    assert 'data-blonly="1"' in html
+    assert "blacklistRemoved.add(tag)" in html
+
+
 def test_page_persists_blacklist_add_remove_tombstones_not_the_raw_set():
     """R5 follow-up: a raw Set snapshot in localStorage can't distinguish "matches the DB
     payload" from "user removed a payload entry", so a local un-blacklist silently reverted on

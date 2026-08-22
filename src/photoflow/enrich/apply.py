@@ -98,15 +98,25 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
     # never legitimately rename one. Renames go through `enrich merge`. Guarding on
     # person_id IS NULL (and skipping the person upsert entirely) stops a stale CSV from
     # re-creating a merged-away alias and repointing its faces back (R8).
+    already_named = 0
     for row in face_csv:
         if not face_is_applied(row.get("person", ""), row.get("decision", "")):
             continue
         face_id = int(row["face_id"])
         cur = conn.execute("SELECT person_id FROM faces WHERE id=?", (face_id,)).fetchone()
-        if cur is None or cur["person_id"] is not None:
+        if cur is None:
+            continue
+        if cur["person_id"] is not None:
+            # Silently dropping these made an attempted rename look like it worked. Say so.
+            already_named += 1
             continue
         pid = _upsert_person(conn, row["person"].strip())
         conn.execute("UPDATE faces SET person_id=? WHERE id=?", (pid, face_id))
+    if already_named:
+        print(
+            f"  {already_named} face(s) in faces.csv already have a name"
+            " - renames go through 'enrich merge'"
+        )
 
     # 1b. "not interested" clusters: a cluster whose every member is skipped (none named) was
     # dismissed wholesale in the page -> mark its faces ignored so re-cluster/review drop them
@@ -153,7 +163,8 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
             log_action(conn, log_fh, run_id, 0, "tag_unblacklisted", t)
         if un_blacklisted:
             names = ", ".join(sorted(un_blacklisted))
-            print(f"  un-blacklisted {len(un_blacklisted)} tag(s): {names}")
+            suffix = " (dry-run, rolled back)" if dry else ""
+            print(f"  un-blacklisted {len(un_blacklisted)} tag(s): {names}{suffix}")
         blacklist = csv_blacklist
     else:
         blacklist = csv_blacklist | db_blacklist
@@ -320,23 +331,29 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
             for fid, sig, _dest, _block in chunk:
                 _mark_applied(fid, sig)
                 written += 1
-            continue
-        print(
-            f"  exiftool batch rc={res.returncode}: retrying its {len(chunk)} file(s)"
-            " individually to find the bad one(s)..."
-        )
-        for fid, sig, dest, block in chunk:
-            one = exiftool_apply_argfile(block)
-            if one.returncode == 0:
-                _mark_applied(fid, sig)
-                written += 1
-                continue
-            failed += 1
-            if reported < MAX_FAILURE_REPORTS:
-                reported += 1
-                print(f"  FAILED (rc={one.returncode}), not marking applied: {dest}")
-                for err in (one.stderr or "").strip().splitlines()[:5]:
-                    print(f"    {err}")
+        else:
+            print(
+                f"  exiftool batch rc={res.returncode}: retrying its {len(chunk)} file(s)"
+                " individually to find the bad one(s)..."
+            )
+            for fid, sig, dest, block in chunk:
+                one = exiftool_apply_argfile(block)
+                if one.returncode == 0:
+                    _mark_applied(fid, sig)
+                    written += 1
+                    continue
+                failed += 1
+                if reported < MAX_FAILURE_REPORTS:
+                    reported += 1
+                    print(f"  FAILED (rc={one.returncode}), not marking applied: {dest}")
+                    for err in (one.stderr or "").strip().splitlines()[:5]:
+                        print(f"    {err}")
+        # Commit each batch's applied_sig rows: the files on disk are already written, so
+        # holding them in one transaction until the end means a Ctrl-C (or a crash) on a
+        # 45k-file first run throws away every batch's progress and the next run redoes the
+        # lot. A dry run never reaches this: step 5 `continue`s before appending to `blocks`,
+        # so `blocks` is empty and this loop doesn't execute - R2's rollback stays intact.
+        conn.commit()
     if failed > reported:
         print(f"  ... and {failed - reported} more failure(s) not shown.")
 
