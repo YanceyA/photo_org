@@ -47,8 +47,11 @@ def decision_rows(groups, prior: dict[str, dict]) -> list[dict]:
             old = prior.get(str(m["id"]), {})
             # A locked member's decision is not the user's to change: override whatever
             # the CSV says (invariant #4 carries forward *user* decisions, and this is
-            # not one) so apply and the page can never disagree.
-            decision = "keep" if is_locked(m) else old.get("decision", "")
+            # not one) so apply and the page can never disagree. A donor pointing at a
+            # locked keeper is dropped for the same reason: apply never visits its row.
+            lock = is_locked(m)
+            decision = "keep" if lock else old.get("decision", "")
+            merge = "" if lock else old.get("merge_from_file_id", "")
             rows.append(
                 {
                     "group_id": gid,
@@ -58,7 +61,7 @@ def decision_rows(groups, prior: dict[str, dict]) -> list[dict]:
                     "size_kb": round((m["size"] or 0) / 1024),
                     "suggestion": "keep" if m["id"] == best_id else "keep?",
                     "decision": decision,
-                    "merge_from_file_id": old.get("merge_from_file_id", ""),
+                    "merge_from_file_id": merge,
                 }
             )
     return rows
@@ -260,6 +263,11 @@ function fmtMp(f) {
   return f.w && f.h ? ((f.w * f.h) / 1e6).toFixed(1) + " MP" : "? MP";
 }
 
+// A mouse click focuses the <button> it hits; the keydown handler deliberately hands
+// Enter back to a focused control, so a clicked Keep would re-activate on the next
+// Enter and undo itself. Card buttons therefore refuse mouse focus outright.
+const NOFOCUS = ' onmousedown="event.preventDefault()"';
+
 function build() {
   const main = document.getElementById("groups");
   for (const g of DATA.groups) {
@@ -280,7 +288,8 @@ function build() {
           'title="already copied into the library in an earlier round">in library</span>' : "");
       const keepbtn = f.locked
         ? '<button class="keepbtn on" disabled title="already in the library">Keep</button>'
-        : '<button class="keepbtn" onclick="pf.keep(' + f.id + ')">Keep</button>';
+        : '<button class="keepbtn"' + NOFOCUS +
+          ' onclick="pf.keep(' + f.id + ')">Keep</button>';
       cards += '<div class="f" id="f' + f.id + '">' +
         '<span class="num">' + (i + 1) + '</span>' +
         '<div class="thumb">' + img + '</div>' +
@@ -293,14 +302,14 @@ function build() {
         esc(f.date || "no date") + '</div><div class="path" title="' + esc(f.path) + '">' +
         esc(f.path) + "</div>" +
         '<div class="actions">' + keepbtn +
-        '<button class="donate" onclick="pf.donate(' + f.id + ')" ' +
+        '<button class="donate"' + NOFOCUS + ' onclick="pf.donate(' + f.id + ')" ' +
         'title="copy missing metadata (GPS, dates) from this file into the keeper">' +
         "\\u2192 donate metadata</button></div>" +
         '<div class="state"></div></div>';
     });
     div.innerHTML = "<h3>group " + g.gid + " \\u00b7 " + g.files.length + " files " +
       '<span class="keepcount"></span>' +
-      '<button class="acceptbtn" onclick="pf.accept(' + g.gid + ')" ' +
+      '<button class="acceptbtn"' + NOFOCUS + ' onclick="pf.accept(' + g.gid + ')" ' +
       'title="keep the suggested photo, skip the rest (Enter)">\\u2713 keep suggested</button>' +
       '</h3><div class="cards">' + cards + "</div>";
     main.appendChild(div);
@@ -327,9 +336,10 @@ function setCursor(gid, scroll) {
 function acceptSuggested(gid) {  // keep the suggested member (rest skip), then advance
   const g = byGid[gid];
   if (!groupDecided(g)) {
-    if (g.files.some((f) => f.locked)) {
-      // an in-library keeper already covers this group: never import a look-alike
-      // silently - the new members skip unless the user keeps one explicitly
+    if (g.files.some((f) => f.locked || dec[f.id] === "keep")) {
+      // this group already has a keeper (in-library, or carried forward from the CSV):
+      // the undecided members skip. Never clickKeep here - on an existing keeper that
+      // un-keeps it, and a look-alike must never be imported silently.
       g.files.forEach((f) => { if (!f.locked && !dec[f.id]) dec[f.id] = "skip"; });
       cur = gid;
       persist();
@@ -379,13 +389,14 @@ function csvField(v) {
 function serializeCsv() {
   const lines = [COLS.join(",")];
   for (const g of DATA.groups) {
-    const hasKeep = g.files.some((f) => dec[f.id] === "keep");
+    // a locked keeper is not a donation target: apply never visits its row
+    const hasKeep = g.files.some((f) => dec[f.id] === "keep" && !f.locked);
     const donor = donorOf[g.gid];
     const donorOk = hasKeep && donor != null &&
       g.files.some((f) => f.id === donor && dec[f.id] === "skip");
     for (const f of g.files) {
       const d = dec[f.id] || "";
-      const merge = d === "keep" && donorOk ? donor : "";
+      const merge = d === "keep" && !f.locked && donorOk ? donor : "";
       lines.push([g.gid, f.id, f.path, f.csv.resolution, f.csv.size_kb,
                   f.csv.suggestion, d, merge].map(csvField).join(","));
     }
@@ -410,7 +421,7 @@ function refresh() {
   let decided = 0;
   if (cur == null || !groupVisible(byGid[cur])) cur = nextVisible(cur, +1);  // skip hidden groups
   for (const g of DATA.groups) {
-    const hasKeep = g.files.some((f) => dec[f.id] === "keep");
+    const hasKeep = g.files.some((f) => dec[f.id] === "keep" && !f.locked);
     const isDecided = groupDecided(g);
     if (isDecided) decided++;
     const gdiv = document.getElementById("g" + g.gid);
