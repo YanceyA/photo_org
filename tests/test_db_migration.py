@@ -46,5 +46,7 @@ def test_open_db_adds_applied_sig_to_legacy_enrich_state(tmp_path):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(enrich_state)")}
     assert "applied_sig" in cols
     assert conn.execute("SELECT applied_sig FROM enrich_state").fetchone()["applied_sig"] is None
+    assert "errors" in cols
+    assert conn.execute("SELECT errors FROM enrich_state").fetchone()["errors"] == 0
     conn.close()
     open_db(tmp_path)  # idempotent

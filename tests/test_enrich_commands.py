@@ -105,6 +105,70 @@ def test_scan_stores_faces_tags_and_is_incremental(tmp_path, monkeypatch):
     assert conn.execute("SELECT COUNT(*) c FROM faces").fetchone()["c"] == len(ids)
 
 
+class FlakyDetector(FakeDetector):
+    """Raises on its first call only - a truncated JPEG / transient CUDA OOM."""
+
+    def __init__(self, which=0):
+        super().__init__(which)
+        self.calls = 0
+
+    def detect(self, rgb):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("boom: model blew up on this file")
+        return super().detect(rgb)
+
+
+def test_scan_survives_a_detector_failure_and_retries_next_run(tmp_path, monkeypatch):
+    # E1: one bad file aborted the whole run and rolled back the batch.
+    conn, workdir, lib, ids = _seed(tmp_path, n=3)
+    monkeypatch.setattr(edeps, "HAVE_FACES", True)
+    monkeypatch.setattr(efaces, "FaceDetector", lambda cfg: FlakyDetector(which=0))
+    monkeypatch.setattr(etagger, "build_tagger", lambda cfg, wd: FakeTagger())
+
+    _run(escan.cmd_enrich_scan, conn, workdir)  # must not raise
+
+    assert conn.execute("SELECT COUNT(*) c FROM faces").fetchone()["c"] == 2  # 2 of 3 ok
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) c FROM actions WHERE action='enrich_detect_error'"
+        ).fetchone()["c"]
+        == 1
+    )
+    bad = conn.execute("SELECT * FROM enrich_state WHERE errors=1").fetchall()
+    assert len(bad) == 1
+    assert bad[0]["faces_done"] == 0  # not marked done -> retried next run
+    assert bad[0]["tags_done"] == 1  # the tagger side still succeeded
+
+
+def test_scan_gives_up_on_a_file_after_three_failures(tmp_path, monkeypatch, capsys):
+    conn, workdir, lib, ids = _seed(tmp_path, n=2)
+    conn.execute(
+        "INSERT INTO enrich_state(file_id, faces_done, tags_done, errors, ts) VALUES (?,0,0,3,'')",
+        (ids[0],),
+    )
+    conn.commit()
+    detector = FakeDetector(which=0)
+    calls = {"n": 0}
+    original = detector.detect
+
+    def counting(rgb):
+        calls["n"] += 1
+        return original(rgb)
+
+    detector.detect = counting
+    monkeypatch.setattr(edeps, "HAVE_FACES", True)
+    monkeypatch.setattr(efaces, "FaceDetector", lambda cfg: detector)
+    monkeypatch.setattr(etagger, "build_tagger", lambda cfg, wd: FakeTagger())
+
+    _run(escan.cmd_enrich_scan, conn, workdir)
+
+    assert calls["n"] == 1  # only the healthy file was processed
+    out = capsys.readouterr().out
+    assert "1 files to process" in out
+    assert "repeated errors" in out
+
+
 # --------------------------------------------------------------------------- cluster
 
 
