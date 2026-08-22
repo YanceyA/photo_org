@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import sys
 from pathlib import Path
@@ -26,6 +27,11 @@ def _like_prefix(prefix: str) -> str:
     return esc + "%"
 
 
+def _is_glob(name: str) -> bool:
+    """An exclude_dirs entry is a glob pattern iff it carries a wildcard metacharacter."""
+    return "*" in name or "?" in name
+
+
 def _refresh_meta(conn, args, cfg) -> None:
     """Re-run only the exiftool pass over rows already in the manifest.
 
@@ -36,7 +42,10 @@ def _refresh_meta(conn, args, cfg) -> None:
     are always excluded, matching read_metadata_pending's own exclusion - otherwise this would
     mark them meta_read=0 and they would never actually get re-read.
     """
-    where = ["status NOT IN ('error','skipped_manual')"]
+    # content_hash IS NOT NULL mirrors read_metadata_pending's own filter, so the "N rows
+    # marked" count is exactly the set that pass will actually re-read (a row still waiting to
+    # be hashed is already meta_read=0 and gets picked up by the normal resumable pass).
+    where = ["status NOT IN ('error','skipped_manual')", "content_hash IS NOT NULL"]
     params: list = []
     kinds = args.kind or []
     if kinds:
@@ -82,7 +91,11 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
 
     new_paths = []
     pruned = unreadable = too_small = 0
-    excluded = {d.lower() for d in cfg.exclude_dirs}
+    # An exclude_dirs entry with a glob metacharacter is matched with fnmatch; a plain entry
+    # stays an exact (case-insensitive) name. Lightroom preview bundles carry the catalog name
+    # ("My Catalog Previews.lrdata"), so an exact "Previews.lrdata" never matched a real one.
+    excluded = {d.lower() for d in cfg.exclude_dirs if not _is_glob(d)}
+    exclude_globs = [d.lower() for d in cfg.exclude_dirs if _is_glob(d)]
 
     def _walk_error(err: OSError) -> None:
         nonlocal unreadable
@@ -98,7 +111,8 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
         for dirpath, dirnames, filenames in os.walk(root, onerror=_walk_error):
             keep = []
             for d in sorted(dirnames):
-                if d.lower() in excluded:
+                dl = d.lower()
+                if dl in excluded or any(fnmatch.fnmatchcase(dl, g) for g in exclude_globs):
                     pruned += 1
                     continue
                 keep.append(d)
@@ -117,7 +131,9 @@ def cmd_scan(conn, workdir, run_id, log_fh, args, cfg):
                     unreadable += 1
                     print(f"  unreadable: {e}")
                     continue
-                if st.st_size < cfg.min_size_bytes:
+                # Sidecars are exempt: an .xmp/.aae/.thm is a few hundred bytes by nature, and
+                # a min_size_bytes tuned for thumbnail junk would silently strand them.
+                if kind != "sidecar" and st.st_size < cfg.min_size_bytes:
                     too_small += 1
                     continue
                 sp = str(p)

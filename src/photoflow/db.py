@@ -118,11 +118,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(files)")}
     if "meta_read" not in cols:
-        # 0 = "exiftool has not read this row yet". Pre-existing rows were read by the old
-        # inline pass; re-reading them is harmless because read_metadata_pending never
-        # clobbers known values when exiftool returns no record. The cost is a one-time
-        # metadata pass over existing rows on the next scan.
+        # 0 = "exiftool has not read this row yet", which is the right default for NEW rows.
+        # Legacy rows are different: a row that already has a content_hash got through the old
+        # inline exiftool pass, so its metadata IS read - mark it 1 rather than forcing a
+        # full-manifest re-read on the next scan (re-reading is what `scan --refresh-meta` is
+        # for, on demand). A row without a hash comes from an interrupted scan and stays 0, so
+        # the resumable hash+metadata passes pick it up exactly as they would today.
         conn.execute("ALTER TABLE files ADD COLUMN meta_read INTEGER DEFAULT 0")
+        conn.execute("UPDATE files SET meta_read=1 WHERE content_hash IS NOT NULL")
         conn.commit()
 
 

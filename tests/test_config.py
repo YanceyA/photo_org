@@ -91,8 +91,7 @@ def test_source_hygiene_defaults():
         ".thumbnails",
         ".Trash",
         ".Trashes",
-        "Previews.lrdata",
-        "Smart Previews.lrdata",
+        "*.lrdata",  # glob: real bundles are "<Catalog> Previews.lrdata"
         "Lightroom Settings",
         "__MACOSX",
     ):

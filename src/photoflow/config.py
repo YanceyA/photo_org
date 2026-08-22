@@ -62,6 +62,9 @@ class Config:
     # component BELOW the source root (the root itself is always scanned, even if its own
     # name is listed). Caches, proxies, previews and recycle bins - ingesting them fills the
     # library with derivatives of files it already has.
+    # An entry containing '*' or '?' is a glob (fnmatch), matched case-insensitively against
+    # the whole directory name; everything else is an exact name. Lightroom preview bundles are
+    # named "<Catalog Name> Previews.lrdata", so only a glob catches them.
     exclude_dirs: frozenset[str] = frozenset(
         {
             "CaptureOne",
@@ -75,14 +78,14 @@ class Config:
             ".thumbnails",
             ".Trash",
             ".Trashes",
-            "Previews.lrdata",
-            "Smart Previews.lrdata",
+            "*.lrdata",  # "<Catalog> Previews.lrdata", "<Catalog> Smart Previews.lrdata", ...
             "Lightroom Settings",
             "__MACOSX",
         }
     )
     # Files smaller than this are skipped at walk time. 0 = off (default). 20000 is a
-    # sensible value for sources littered with camera/app thumbnails.
+    # sensible value for sources littered with camera/app thumbnails. Sidecars are exempt -
+    # they're tiny by nature, and dropping them would strand the media they describe.
     min_size_bytes: int = 0
 
     # --- enrich subsystem (all optional; defaults give a working CPU-faces / RAM-tags run) ---

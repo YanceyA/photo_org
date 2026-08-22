@@ -6,7 +6,9 @@ changes `date_taken` but leaves the file sitting in the folder its OLD date impl
 will not touch it - it only processes `planned`/`review` rows (apply.py:27). `refile` closes
 that loop.
 
-Sources are never touched: this moves files inside the library root only.
+Sources are never touched: every row is checked against `--out` in pass 1 and a file that does
+not already live under that root is reported and skipped, so this only ever moves files that
+are inside the library root already.
 
 Immich / digiKam / backup note: a moved file looks like delete + add to any external indexer.
 Rescan the external library after a refile run.
@@ -69,8 +71,12 @@ def _guarded_move(old: Path, new: Path) -> None:
 
 def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
     out_root = Path(args.out).expanduser().resolve()
+    # content_hash/ext are required by dest_for(); a hand-edited or half-written row missing
+    # either would raise mid-pass, after earlier rows had already moved. Filter them out in SQL
+    # so the run stays all-or-nothing at the pre-flight stage.
     rows = conn.execute(
-        "SELECT * FROM files WHERE status='copied' AND dest_path IS NOT NULL ORDER BY id"
+        "SELECT * FROM files WHERE status='copied' AND dest_path IS NOT NULL "
+        "AND content_hash IS NOT NULL AND ext IS NOT NULL ORDER BY id"
     ).fetchall()
 
     # ---- sanity: --out must be the root these rows were actually copied into. Point it
@@ -82,11 +88,20 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
     # ---- pass 1: collect every candidate move (nothing touches the disk yet)
     moves: list[tuple[int, Path, Path, str]] = []
     missing: list[str] = []
+    outside: list[str] = []
     reconciles: list[tuple[int, Path, Path]] = []
     dests: list[Path] = []  # the effective (post-reconcile) library path of every copied row
     for r in rows:
         old = Path(r["dest_path"])
         new = dest_for(r, out_root, cfg.slug_max)
+        # Per-row containment. The `any()` guard above only proves SOME row lives under --out;
+        # a manifest that spans two libraries (an old root plus the current one) would otherwise
+        # have its old-root rows swept INTO this library. Row still lands in `dests` so pass 2
+        # sees the path it occupies.
+        if not str(old).casefold().startswith(prefix):
+            outside.append(str(old))
+            dests.append(old)
+            continue
         # Path equality is case-insensitive on Windows, so a case-only rename compares equal
         # and stops here - it never reaches pass 2 or pass 3.
         if old == new:
@@ -158,6 +173,12 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
             print(f"  missing: {m}")
         if len(missing) > MISSING_LINES:
             print(f"  ... and {len(missing) - MISSING_LINES} more")
+    if outside:
+        print(f"refile: {len(outside)} copied file(s) not under {out_root}, skipped:")
+        for o in outside[:MISSING_LINES]:
+            print(f"  outside --out: {o}")
+        if len(outside) > MISSING_LINES:
+            print(f"  ... and {len(outside) - MISSING_LINES} more")
     if reconciles:
         print(f"refile: {len(reconciles)} file(s) already at their new path (crashed run?)")
     if by_reason["name changed"] > len(rows) // 2:
@@ -175,7 +196,7 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
                 f"  ... and {len(moves) - DRY_RUN_LINES} more "
                 f"(a real run records every move in {log_path})"
             )
-        print(f"refile dry-run: {len(moves)} would move ({summary}).")
+        print(f"refile dry-run: {len(moves)} would move ({summary}), {len(outside)} outside --out.")
         return
 
     moved = sidecars = failed = 0
@@ -239,6 +260,7 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
     done = ", ".join(f"{k}: {v}" for k, v in sorted(done_reasons.items())) or "none"
     print(
         f"refile complete: {moved} moved ({done}), {sidecars} sidecars, {failed} failed, "
-        f"{len(reconciles)} reconciled, {len(missing)} missing. "
+        f"{len(reconciles)} reconciled, {len(missing)} missing, "
+        f"{len(outside)} outside --out. "
         "Rescan your external library (Immich/digiKam) afterwards."
     )

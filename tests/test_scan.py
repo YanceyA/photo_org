@@ -82,6 +82,40 @@ def test_scan_skips_files_below_min_size(tmp_path: Path):
     assert "1 below min size" in out
 
 
+@pytest.mark.exiftool
+def test_scan_prunes_glob_excluded_directories(tmp_path: Path):
+    """Lightroom preview bundles carry the catalog name, so only a glob entry catches them."""
+    src = tmp_path / "src"
+    for seed, rel in enumerate(("My Catalog Previews.lrdata", "Foo Smart Previews.lrdata"), 70):
+        (src / rel).mkdir(parents=True)
+        _gradient(320, 240, seed=seed).save(src / rel / "preview.jpg", "JPEG")
+    _gradient(320, 240, seed=47).save(src / "keep_me.jpg", "JPEG", quality=92)
+
+    work = tmp_path / "work"
+    out = pf(work, "scan", str(src)).stdout
+    names = {Path(r["source_path"]).name for r in q(work, "SELECT source_path FROM files")}
+    assert names == {"keep_me.jpg"}
+    assert "pruned 2 dirs" in out
+
+
+@pytest.mark.exiftool
+def test_min_size_does_not_drop_sidecars(tmp_path: Path):
+    """An .xmp is a few hundred bytes by nature - min_size_bytes must not strand it."""
+    src = tmp_path / "src"
+    src.mkdir()
+    _gradient(640, 480, seed=48).save(src / "photo.jpg", "JPEG", quality=92)  # ~25 KB
+    (src / "photo.xmp").write_text("<x:xmpmeta xmlns:x='adobe:ns:meta/'/>", encoding="utf-8")
+    Image.new("RGB", (8, 8), (9, 9, 9)).save(src / "thumb.jpg", "JPEG")  # ~630 B
+    work = tmp_path / "work"
+    work.mkdir(parents=True)
+    (work / "photoflow.toml").write_text("min_size_bytes = 5000\n", encoding="utf-8")
+
+    out = pf(work, "scan", str(src)).stdout
+    rows = {Path(r["source_path"]).name: r["kind"] for r in q(work, "SELECT * FROM files")}
+    assert rows == {"photo.jpg": "image", "photo.xmp": "sidecar"}
+    assert "1 below min size" in out
+
+
 def test_scan_counts_unreadable_entries_instead_of_crashing(tmp_path, monkeypatch, capsys):
     """os.walk's onerror callback must be counted, not raised (C1: one bad entry aborted a scan)."""
     import photoflow.scan as scan_mod
@@ -467,7 +501,7 @@ def test_refresh_meta_prefix_matches_whole_path_components(tmp_path: Path):
     assert rows["two.jpg"]["exif_date"] == "STALE"  # photos_backup is not under photos/
 
 
-def test_refresh_meta_skips_error_and_skipped_manual_rows(tmp_path: Path, monkeypatch):
+def test_refresh_meta_skips_error_and_skipped_manual_rows(tmp_path: Path, monkeypatch, capsys):
     import argparse
 
     import photoflow.scan as scan_mod
@@ -480,6 +514,9 @@ def test_refresh_meta_skips_error_and_skipped_manual_rows(tmp_path: Path, monkey
             (str(tmp_path / "err.jpg"), "image", "error", "a" * 64),
             (str(tmp_path / "skip.jpg"), "image", "skipped_manual", "b" * 64),
             (str(tmp_path / "ok.jpg"), "image", "copied", "c" * 64),
+            # never fingerprinted (interrupted scan): read_metadata_pending won't select it,
+            # so --refresh-meta must not count it as "marked" either.
+            (str(tmp_path / "nohash.jpg"), "image", "scanned", None),
         ],
     )
     conn.commit()
@@ -495,4 +532,6 @@ def test_refresh_meta_skips_error_and_skipped_manual_rows(tmp_path: Path, monkey
     assert state["err.jpg"] == 1, "error rows are left alone"
     assert state["skip.jpg"] == 1, "skipped_manual rows are left alone"
     assert state["ok.jpg"] == 0, "copied row was reset for re-read"
+    assert state["nohash.jpg"] == 1, "un-fingerprinted rows are not part of a metadata refresh"
+    assert "1 manifest rows marked" in capsys.readouterr().out
     conn.close()

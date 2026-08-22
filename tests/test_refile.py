@@ -396,3 +396,67 @@ def test_reconcile_also_brings_the_sidecar_across(tmp_path: Path, capsys):
     assert Path(str(lib / NEW_REL) + ".xmp").read_text(encoding="utf-8") == "<x/>"
     assert not Path(str(lib / OLD_REL) + ".xmp").exists()
     assert dest_of(conn, H) == str(lib / NEW_REL)
+
+
+def test_a_row_outside_out_is_skipped_not_swept_into_the_library(tmp_path: Path, capsys):
+    """A manifest spanning two libraries: the row still under the OLD root must stay there.
+
+    The `any()` sanity check only proves SOME row lives under --out; without a per-row check
+    the old-root row gets moved INTO this library."""
+    work, lib, conn = make_lib(tmp_path)
+    stray = tmp_path / "OLD_LIBRARY" / OLD_REL2
+    add_row(
+        conn,
+        source_path=r"H:\backup\2018\IMG_0736.MOV",
+        content_hash=H2,
+        date="2011-03-15T10:11:12",
+        dest_path=stray,
+    )
+    run_refile(work, lib, conn, dry_run=False)
+    out = capsys.readouterr().out
+
+    assert stray.read_bytes() == b"OTHERBYTES"  # never touched
+    assert not (lib / NEW_REL2).exists()
+    assert dest_of(conn, H2) == str(stray)  # manifest still points at the old root
+    assert f"outside --out: {stray}" in out
+    assert "1 outside --out" in out
+    assert (lib / NEW_REL).read_bytes() == b"MOVIEBYTES"  # the in-root row still moved
+    assert dest_of(conn, H) == str(lib / NEW_REL)
+
+
+@pytest.mark.exiftool
+def test_refile_runbook_repairs_a_video_filed_under_its_import_year(tmp_path: Path):
+    """The owner-facing repair loop end to end: a video whose EXIF date was never read lands
+    under its mtime year, then scan --refresh-meta -> plan -> refile walks it (and its sidecar)
+    to the folder its real capture date implies."""
+    from datetime import UTC, datetime
+
+    from conftest import make_minimal_mp4
+
+    src, work, lib = tmp_path / "src", tmp_path / "work", tmp_path / "lib"
+    src.mkdir()
+    clip = src / "IMG_0735.MOV"
+    make_minimal_mp4(clip, datetime(2010, 9, 3, 16, 3, 31, tzinfo=UTC))
+    os.utime(clip, (1534000000, 1534000000))  # mtime in 2018: the wrong year to file under
+    pf(work, "scan", str(src))
+    conn = open_db(work)
+    conn.execute("UPDATE files SET exif_date=NULL")  # pre-fix state: -fast2 read nothing back
+    conn.commit()
+    conn.close()
+    pf(work, "plan")
+    pf(work, "apply", "--out", str(lib))
+    wrong = Path(q(work, "SELECT dest_path FROM files")[0]["dest_path"])
+    assert wrong.relative_to(lib).parts[0] == "2018"
+
+    pf(work, "scan", "--refresh-meta", "--kind", "video")
+    pf(work, "plan")
+    assert "MOVE" in pf(work, "refile", "--out", str(lib), "--dry-run").stdout
+    assert wrong.exists(), "dry run must not move anything"
+    pf(work, "refile", "--out", str(lib))
+
+    row = q(work, "SELECT dest_path, date_source FROM files")[0]
+    fixed = Path(row["dest_path"])
+    assert fixed.relative_to(lib).parts[:2] == ("2010", "09")
+    assert fixed.exists() and Path(str(fixed) + ".xmp").exists()
+    assert not wrong.exists() and not Path(str(wrong) + ".xmp").exists()
+    assert row["date_source"] == "exif"
