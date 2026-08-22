@@ -8,6 +8,7 @@ from photoflow.xmp import embed_args, xmp_sidecar
 
 def test_embed_args_exact_lines():
     assert embed_args("d.jpg", "desc", ["k1", "k2"]) == [
+        "-P",
         "-overwrite_original",
         "-XMP-dc:Description=desc",
         "-XMP-dc:Subject=k1",

@@ -87,6 +87,10 @@ class Config:
     # sensible value for sources littered with camera/app thumbnails. Sidecars are exempt -
     # they're tiny by nature, and dropping them would strand the media they describe.
     min_size_bytes: int = 0
+    # Sidecars (.thm thumbnails, .aae edit lists, foreign .xmp) are metadata about a
+    # photo, not a photo. Default False: they stay in the manifest for dedupe/audit but
+    # are never copied. Set true to restore the pre-2026-08 behaviour.
+    copy_sidecars: bool = False
 
     # --- enrich subsystem (all optional; defaults give a working CPU-faces / RAM-tags run) ---
     # auto = prefer RAM++ but fall back to CLIP/SigLIP if it can't load. RAM++ needs an old

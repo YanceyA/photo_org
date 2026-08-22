@@ -13,6 +13,7 @@ def test_defaults_match_legacy_constants():
     assert c.slug_max == 40
     assert c.exiftool_batch == 200
     assert ".jpg" in c.image_ext and ".cr2" in c.raw_ext and ".mp4" in c.video_ext
+    assert c.copy_sidecars is False  # sidecars are not photos (review finding H5)
 
 
 def test_enrich_defaults():

@@ -16,6 +16,7 @@ from photoflow.enrich.review import cmd_enrich_review
 from photoflow.enrich.scan import cmd_enrich_scan
 from photoflow.enrich.status import cmd_enrich_status
 from photoflow.planner import cmd_plan
+from photoflow.prune import cmd_prune_sidecars
 from photoflow.refile import cmd_refile
 from photoflow.review import cmd_review
 from photoflow.scan import cmd_scan
@@ -78,6 +79,12 @@ def main():
     p.add_argument("--out", required=True, help="output library root (same as apply --out)")
     p.add_argument("--dry-run", action="store_true")
 
+    p = sub.add_parser(
+        "prune-sidecars", help="move already-copied sidecar files out of the library"
+    )
+    p.add_argument("--out", required=True, help="output library root")
+    p.add_argument("--dry-run", action="store_true")
+
     sub.add_parser("status", help="manifest summary")
 
     # enrich: faces + content tags written into the organized library as portable XMP
@@ -114,6 +121,7 @@ def main():
             "review": cmd_review,
             "apply": cmd_apply,
             "refile": cmd_refile,
+            "prune-sidecars": cmd_prune_sidecars,
             "status": cmd_status,
         }[args.cmd]
 

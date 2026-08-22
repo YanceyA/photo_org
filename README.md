@@ -64,6 +64,12 @@ duplicates. Re-running any step is safe (idempotent).
 - **Bursts kept** — lookalike groups where every frame has EXIF time from the
   same camera within 10 s are treated as unique and kept silently.
 - **RAW+JPEG pairs** — same stem in the same folder: both kept, tagged as a pair.
+- **Sidecars are not photos** — `.thm` camera thumbnails, `.aae` edit lists and
+  pre-existing `.xmp` files are fingerprinted into the manifest (so they still
+  count for dedupe and audit) but never copied into the library; their status
+  becomes `skipped_sidecar`. Set `copy_sidecars = true` in `photoflow.toml` to
+  copy them anyway. If an earlier run already copied some, evict them with
+  `photoflow prune-sidecars --out <DIR>` (below).
 - **Live Photos** — image+video with the same stem: both kept; the video
   inherits the photo's date.
 - **Date resolution cascade** — EXIF DateTimeOriginal/CreateDate -> filename

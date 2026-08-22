@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 EXIF_TAGS = [
@@ -121,17 +122,32 @@ def read_keywords(paths: list[str], batch_size: int = 200) -> dict[str, set[str]
     return out
 
 
-def exiftool_apply_argfile(lines: list[str]):
+@dataclass(frozen=True)
+class ExiftoolResult:
+    """Outcome of one batched exiftool run. Non-zero rc is data, not an exception:
+    one locked file must never abort a whole apply/enrich-apply pass."""
+
+    returncode: int
+    stderr: str
+    stdout: str
+
+
+def exiftool_apply_argfile(lines: list[str]) -> ExiftoolResult:
     """Run one exiftool process over a prepared -execute argfile (fast batching)."""
     if not lines:
-        return
+        return ExiftoolResult(0, "", "")
     with tempfile.NamedTemporaryFile("w", suffix=".args", delete=False, encoding="utf-8") as af:
         af.write("\n".join(lines) + "\n")
         argfile = af.name
     try:
-        subprocess.run(
-            ["exiftool", "-@", argfile, "-charset", "filename=utf8"], capture_output=True, text=True
+        res = subprocess.run(
+            ["exiftool", "-@", argfile, "-charset", "filename=utf8"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
+        return ExiftoolResult(res.returncode, res.stderr or "", res.stdout or "")
     finally:
         os.unlink(argfile)
 
@@ -141,6 +157,7 @@ def merge_metadata(donor_path: str, keeper_path: str) -> None:
     subprocess.run(
         [
             "exiftool",
+            "-P",  # preserve FileModifyDate (HANDOFF §2.1)
             "-overwrite_original",
             "-wm",
             "cg",

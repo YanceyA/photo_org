@@ -3,6 +3,7 @@
 import csv
 import json
 import re
+from pathlib import Path
 
 from photoflow.review_page import (
     CSV_COLUMNS,
@@ -27,6 +28,11 @@ def g(**kw):
     )
     base.update(kw)
     return base
+
+
+def locked_groups():
+    """A group pairing an already-copied keeper with a newly imported look-alike."""
+    return {7: [g(id=1, status="copied"), g(id=2, status="review", width=10, height=10)]}
 
 
 GROUPS = {
@@ -133,16 +139,27 @@ def test_render_page_escapes_script_close_in_paths():
     assert json.loads(data) == payload
 
 
-def test_payload_flags_members_already_in_library():
-    """A near-dupe group can pair a new file with an already-copied keeper whose
-    'keep' was carried forward; the page needs to know which is which."""
-    groups = {7: [g(id=1, status="copied"), g(id=2, status="review", width=10, height=10)]}
+def test_payload_marks_copied_members_locked():
+    """A member already copied into the library is a locked keeper: apply cannot act on
+    it (it only processes planned/review), so the page must not offer a decision."""
+    groups = locked_groups()
     rows = decision_rows(groups, {"1": {"decision": "keep", "merge_from_file_id": ""}})
     f1, f2 = build_payload(groups, rows, "w", set())["groups"][0]["files"]
-    assert f1["inLibrary"] is True and f2["inLibrary"] is False
-    # members without a status column (older callers / fixtures) are simply not flagged
+    assert f1["locked"] is True and f2["locked"] is False
+    # members without a status column (older callers / fixtures) are never locked
     plain = build_payload(GROUPS, decision_rows(GROUPS, {}), "w", set())
-    assert plain["groups"][0]["files"][0]["inLibrary"] is False
+    assert plain["groups"][0]["files"][0]["locked"] is False
+
+
+def test_decision_rows_lock_copied_members_against_the_csv():
+    """A stale 'skip' in decisions.csv must never flip a locked keeper (it would read as
+    a decision that apply silently ignores), and a donor aimed at one is dropped: apply
+    never visits a copied row, so the metadata merge could never happen."""
+    prior = {"1": {"decision": "skip", "merge_from_file_id": "2"}}
+    rows = decision_rows(locked_groups(), prior)
+    assert rows[0]["decision"] == "keep"
+    assert rows[0]["merge_from_file_id"] == ""  # donation into a locked keeper: dropped
+    assert rows[1]["decision"] == ""  # the new member is still undecided
 
 
 # --- behavioural test of the in-page JS, run under node with a tiny DOM shim ------------
@@ -218,13 +235,10 @@ def _run_page_js(page: str, probe_js: str) -> dict:
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
-def test_page_js_group_with_carried_forward_keeper_is_not_decided():
-    """Regression: after an incremental import, plan can pair a NEW file with an
-    already-copied keeper whose 'keep' is carried forward from the last round.
-    Such a group is still undecided (the new member has no decision) - it must not
-    count as decided nor be hidden by "hide decided", otherwise the new member is
-    never shown and apply holds it forever."""
-    groups = {7: [g(id=1, status="copied"), g(id=2, status="review", width=10, height=10)]}
+def test_page_js_locked_library_keeper_is_not_editable():
+    """R3: the group is undecided until the NEW member is decided; the locked keeper
+    can't be clicked; Enter skips the new member instead of keeping it too."""
+    groups = locked_groups()
     rows = decision_rows(groups, {"1": {"decision": "keep", "merge_from_file_id": ""}})
     page = render_page(build_payload(groups, rows, "w", set()))
     out = _run_page_js(
@@ -237,17 +251,15 @@ def test_page_js_group_with_carried_forward_keeper_is_not_decided():
         out.state2 = document.getElementById("f2").querySelector(".state").textContent;
         document.getElementById("hide").onchange({ target: { checked: true } });
         out.displayWhenHiding = document.getElementById("g7").style.display;
-        // clicking Keep on the (already-kept) library member confirms it: blanks -> skip
-        window.pf.keep(1);
-        out.afterConfirm = { ...window.pf.dec };
-        out.displayAfterConfirm = document.getElementById("g7").style.display;
-        out.progressAfterConfirm = document.getElementById("progress").textContent;
-        // clicking it again is the normal undo: zero keepers -> whole group back on hold
-        window.pf.keep(1);
-        out.afterUndo = { ...window.pf.dec };
-        // keeping the new member instead auto-skips the library member
-        window.pf.keep(2);
+        window.pf.keep(1);                       // locked: no-op
+        out.afterClickLocked = { ...window.pf.dec };
+        window.pf.accept(7);                     // Enter: new member SKIPS, never keeps
+        out.afterAccept = { ...window.pf.dec };
+        window.pf.keep(2);                       // explicit: keep it IN ADDITION
         out.afterKeep2 = { ...window.pf.dec };
+        out.header = document.getElementById("g7").querySelector(".keepcount").textContent;
+        window.pf.keep(2);                       // re-click un-keeps it again
+        out.afterUnkeep2 = { ...window.pf.dec };
         console.log(JSON.stringify(out));
         """,
     )
@@ -256,11 +268,11 @@ def test_page_js_group_with_carried_forward_keeper_is_not_decided():
     assert out["state1"] == "KEEP · in library"
     assert out["state2"] == "on hold"
     assert out["displayWhenHiding"] == ""  # still visible under "hide decided"
-    assert out["afterConfirm"] == {"1": "keep", "2": "skip"}
-    assert out["displayAfterConfirm"] == "none"
-    assert out["progressAfterConfirm"] == "decided 1 / 1 groups"
-    assert out["afterUndo"] == {"1": "", "2": ""}
-    assert out["afterKeep2"] == {"1": "skip", "2": "keep"}
+    assert out["afterClickLocked"] == {"1": "keep", "2": ""}
+    assert out["afterAccept"] == {"1": "keep", "2": "skip"}
+    assert out["afterKeep2"] == {"1": "keep", "2": "keep"}
+    assert out["header"] == "2 keepers"
+    assert out["afterUnkeep2"] == {"1": "keep", "2": "skip"}
 
 
 def test_page_js_fresh_group_click_semantics_unchanged():
@@ -364,3 +376,122 @@ def test_page_js_keys_ignored_in_inputs():
         """,
     )
     assert out == {"1": "", "2": ""}
+
+
+def test_page_js_keys_ignored_on_buttons():
+    """A Tab-focused button must keep Enter for itself: blurring and continuing fired
+    acceptSuggested when the user pressed Enter on 'Save'."""
+    page = render_page(build_payload(GROUPS, decision_rows(GROUPS, {}), "w", set()))
+    out = _run_page_js(
+        page,
+        """
+        key("Enter", { tagName: "BUTTON" });
+        console.log(JSON.stringify({ ...window.pf.dec }));
+        """,
+    )
+    assert out == {"1": "", "2": ""}
+
+
+def test_render_page_contains_locked_guards():
+    """String-level pins for the JS guards (same style as the hardening test above)."""
+    groups = locked_groups()
+    page = render_page(build_payload(groups, decision_rows(groups, {}), "w", set()))
+    assert "if (locked[id]) return;" in page  # clickKeep is a no-op on locked members
+    assert "includes(tag)) return;" in page  # keydown ignores BUTTON/INPUT/TEXTAREA/SELECT
+    assert "keepcount" in page  # header advertises multiple keepers
+    assert "disabled" in page  # locked cards render a disabled Keep button
+
+
+def test_page_js_accept_keeps_a_carried_forward_keeper_and_skips_the_rest():
+    """A keeper carried forward from decisions.csv (status not yet 'copied') must survive
+    Enter: acceptSuggested used to clickKeep the suggestion, which UN-kept it and reset
+    the whole group to 'on hold' while the cursor moved on, losing the decision."""
+    rows = decision_rows(GROUPS, {"1": {"decision": "keep", "merge_from_file_id": ""}})
+    page = render_page(build_payload(GROUPS, rows, "w", set()))
+    out = _run_page_js(
+        page,
+        """
+        const out = {};
+        window.pf.accept(7);
+        out.afterAccept = { ...window.pf.dec };
+        out.progress = document.getElementById("progress").textContent;
+        console.log(JSON.stringify(out));
+        """,
+    )
+    assert out["afterAccept"] == {"1": "keep", "2": "skip"}
+    assert out["progress"] == "decided 1 / 1 groups"
+
+
+def test_page_js_locked_keeper_is_never_a_donation_target():
+    """apply never visits a copied row, so metadata can't be merged into a locked keeper:
+    the donate button stays hidden and the CSV's merge column stays empty."""
+    groups = locked_groups()
+    page = render_page(build_payload(groups, decision_rows(groups, {}), "w", set()))
+    out = _run_page_js(
+        page,
+        """
+        const out = {};
+        window.pf.accept(7);                     // locked keeper + member 2 -> skip
+        out.donateDisplay = document.getElementById("f2").querySelector(".donate").style.display;
+        window.pf.donate(2);                     // even if forced, it can't reach the CSV
+        out.csv = window.pf.serializeCsv();
+        console.log(JSON.stringify(out));
+        """,
+    )
+    assert out["donateDisplay"] == "none"  # the only keeper is locked -> nothing to donate to
+    data = [r for r in out["csv"].split("\r\n") if r][1:]
+    assert [r.split(",")[-2] for r in data] == ["keep", "skip"]
+    assert [r.split(",")[-1] for r in data] == ["", ""]  # merge column empty on both rows
+
+
+def test_render_page_card_buttons_refuse_mouse_focus():
+    """Chrome focuses a <button> on mouse click and the keydown handler hands Enter back
+    to a focused control, so a clicked Keep would re-activate on the next Enter and undo
+    itself. Every card/header button suppresses focus on mousedown."""
+    page = render_page(build_payload(GROUPS, decision_rows(GROUPS, {}), "w", set()))
+    assert "const NOFOCUS = ' onmousedown=\"event.preventDefault()\"';" in page
+    out = _run_page_js(
+        page,
+        """
+        const html = document.getElementById("groups").children[0].innerHTML;
+        const m = html.match(/onmousedown="event[.]preventDefault[(][)]"/g) || [];
+        console.log(JSON.stringify({ n: m.length }));
+        """,
+    )
+    assert out["n"] == 5  # Keep + donate on each of the 2 cards, plus "keep suggested"
+
+
+def test_review_regeneration_relocks_copied_members(tmp_path: Path):
+    """Invariant #4 says decisions carry forward - but a copied member's decision is not
+    the user's to change, so a stale 'skip' for it is overridden back to 'keep'."""
+    from photoflow.db import new_run, open_db
+    from photoflow.review import cmd_review
+
+    work = tmp_path / "work"
+    conn = open_db(work)
+    conn.executemany(
+        "INSERT INTO files(source_path, kind, ext, role, status, group_id, width, height, size)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            (str(tmp_path / "a.jpg"), "image", ".jpg", "review", "copied", 7, 4000, 3000, 10),
+            (str(tmp_path / "b.jpg"), "image", ".jpg", "review", "review", 7, 1600, 1200, 10),
+        ],
+    )
+    conn.commit()
+    ids = [r["id"] for r in conn.execute("SELECT id FROM files ORDER BY id")]
+    dec = work / "decisions.csv"
+    dec.write_text(
+        "group_id,file_id,source_path,resolution,size_kb,suggestion,decision,"
+        "merge_from_file_id\n"
+        f"7,{ids[0]},x,4000x3000,0,keep,skip,\n",
+        encoding="utf-8",
+    )
+    run_id = new_run(conn, "review", {})
+    (work / "logs").mkdir(exist_ok=True)
+    with open(work / "logs" / "t.jsonl", "a", encoding="utf-8") as fh:
+        cmd_review(conn, work, run_id, fh, None, None)
+
+    with open(dec, newline="", encoding="utf-8") as f:
+        rows = {r["file_id"]: r["decision"] for r in csv.DictReader(f)}
+    assert rows[str(ids[0])] == "keep"  # locked: the CSV skip was overridden
+    assert rows[str(ids[1])] == ""
