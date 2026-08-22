@@ -1065,7 +1065,84 @@ def test_merge_keeps_alias_row_when_strip_fails(tmp_path, monkeypatch, capsys):
     assert "kept persons row" in out
     names = {r["name"] for r in conn.execute("SELECT name FROM persons")}
     assert names == {"Deirdre Hough", "Deidre Hough"}  # the alias row survives
-    canonical = conn.execute("SELECT id FROM persons WHERE name='Deirdre Hough'").fetchone()["id"]
+    # the face stays on the alias, so a re-run finds the file again and retries the strip
+    alias_id = conn.execute("SELECT id FROM persons WHERE name='Deidre Hough'").fetchone()["id"]
+    assert (
+        conn.execute("SELECT person_id FROM faces WHERE id=?", (face_id,)).fetchone()["person_id"]
+        == alias_id
+    )
+    # the file was not rewritten, so its signature must not be invalidated either
+    assert (
+        conn.execute("SELECT applied_sig FROM enrich_state WHERE file_id=?", (fid,)).fetchone()[
+            "applied_sig"
+        ]
+        == "deadbeef"
+    )
+    acts = [
+        r["action"]
+        for r in conn.execute("SELECT action FROM actions WHERE action='enrich_merge_strip_error'")
+    ]
+    assert acts == ["enrich_merge_strip_error"]
+
+
+def test_merge_keeps_alias_row_when_the_embed_target_is_missing(tmp_path, monkeypatch, capsys):
+    # A missing EMBEDDED target is not "nothing to strip" - the file may come back still
+    # carrying the old name, so it counts as a failure (an absent sidecar does not).
+    conn, workdir, lib, fid = _named_library_file(tmp_path, "Deidre Hough")
+    face_id = conn.execute("SELECT id FROM faces").fetchone()["id"]
+    dest = conn.execute("SELECT dest_path FROM files WHERE id=?", (fid,)).fetchone()["dest_path"]
+    Path(dest).unlink()
+    captured = {}
+    monkeypatch.setattr(emerge, "exiftool_available", lambda: True)
+    monkeypatch.setattr(emerge, "exiftool_apply_argfile", _fake_exiftool(captured))
+
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Deirdre Hough",
+        aliases=["Deidre Hough"],
+    )
+
+    out = capsys.readouterr().out
+    assert "file not found" in out and "kept persons row" in out
+    assert captured.get("lines", []) == []  # nothing to write
+    alias_id = conn.execute("SELECT id FROM persons WHERE name='Deidre Hough'").fetchone()["id"]
+    assert (
+        conn.execute("SELECT person_id FROM faces WHERE id=?", (face_id,)).fetchone()["person_id"]
+        == alias_id
+    )
+    detail = conn.execute(
+        "SELECT detail FROM actions WHERE action='enrich_merge_strip_error'"
+    ).fetchone()["detail"]
+    assert "file not found" in detail
+
+
+def test_merge_rerun_retries_failed_files(tmp_path, monkeypatch):
+    # The recovery path: the first merge could not strip the file, so nothing was folded;
+    # the second one succeeds and completes the merge.
+    conn, workdir, lib, fid = _named_library_file(tmp_path, "Deidre Hough")
+    face_id = conn.execute("SELECT id FROM faces").fetchone()["id"]
+    monkeypatch.setattr(emerge, "exiftool_available", lambda: True)
+    monkeypatch.setattr(
+        emerge, "exiftool_apply_argfile", lambda lines: ExiftoolResult(1, "Error: locked", "")
+    )
+    kw = dict(canonical="Deirdre Hough", aliases=["Deidre Hough"])
+    _run(emerge.cmd_enrich_merge, conn, workdir, **kw)
+
+    alias_id = conn.execute("SELECT id FROM persons WHERE name='Deidre Hough'").fetchone()["id"]
+    assert (
+        conn.execute("SELECT person_id FROM faces WHERE id=?", (face_id,)).fetchone()["person_id"]
+        == alias_id
+    )
+
+    captured = {}
+    monkeypatch.setattr(emerge, "exiftool_apply_argfile", _fake_exiftool(captured))
+    _run(emerge.cmd_enrich_merge, conn, workdir, **kw)
+
+    assert "-XMP-dc:Subject-=Deidre Hough" in captured["lines"]  # the strip was retried
+    assert {r["name"] for r in conn.execute("SELECT name FROM persons")} == {"Deirdre Hough"}
+    canonical = conn.execute("SELECT id FROM persons").fetchone()["id"]
     assert (
         conn.execute("SELECT person_id FROM faces WHERE id=?", (face_id,)).fetchone()["person_id"]
         == canonical
@@ -1076,11 +1153,6 @@ def test_merge_keeps_alias_row_when_strip_fails(tmp_path, monkeypatch, capsys):
         ]
         is None
     )
-    acts = [
-        r["action"]
-        for r in conn.execute("SELECT action FROM actions WHERE action='enrich_merge_strip_error'")
-    ]
-    assert acts == ["enrich_merge_strip_error"]
 
 
 def test_merge_drops_a_faceless_alias_row(tmp_path, monkeypatch):

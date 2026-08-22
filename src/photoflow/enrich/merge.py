@@ -35,7 +35,7 @@ def _person_id(conn, name: str) -> int | None:
 
 def _strip_alias_keywords(
     conn, log_fh, run_id, alias: str, touched: dict[int, tuple[str, str]], cfg
-) -> tuple[int, list[tuple[int, str]]]:
+) -> tuple[set[int], set[int]]:
     """Delete one merged-away name from the library files' keyword lists.
 
     enrich apply only ever UNIONS keywords, so a renamed person lingers in dc:Subject /
@@ -43,53 +43,64 @@ def _strip_alias_keywords(
     exiftool's '-=' removes that exact list value and is a no-op when it's absent, so this
     strips only the named values and never disturbs other keywords. -P keeps the mtime.
 
-    Returns (files stripped OK, [(file_id, dest) that could not be written]). Like apply, a
-    failed batch is re-run one block at a time: exiftool keeps going after a bad file, so a
-    non-zero rc only means "at least one block failed".
+    Returns ({file_id actually stripped}, {file_id that could not be stripped}). Like apply,
+    a failed batch is re-run one block at a time: exiftool keeps going after a bad file, so a
+    non-zero rc only means "at least one block failed". A file in neither set had nothing to
+    strip (a sidecar apply has never created) and is treated as done.
     """
     remove = keyword_remove_argfile_lines(
         [alias], iptc=cfg.write_iptc_keywords, people_prefix=cfg.people_keyword_prefix
     )
+    failed: set[int] = set()
+    reported = 0
+
+    def _fail(file_id: int, dest: str, detail: str, extra: list[str] = ()) -> None:
+        nonlocal reported
+        failed.add(file_id)
+        log_action(
+            conn, log_fh, run_id, file_id, "enrich_merge_strip_error", f"{alias}: {dest}: {detail}"
+        )
+        if reported < MAX_FAILURE_REPORTS:
+            reported += 1
+            print(f"  FAILED to strip '{alias}': {dest} ({detail})")
+            for err in extra[:3]:
+                print(f"    {err}")
+
     blocks: list[tuple[int, str, list[str]]] = []  # (file_id, dest, argfile lines)
     for file_id, (dest, ext) in touched.items():
-        target = dest if (ext or "").lower() in EMBED_EXT else dest + ".xmp"
-        # A sidecar apply never created holds no keywords - nothing to strip, and asking
-        # exiftool to edit a missing file would be a spurious failure that keeps the row.
+        is_embed = (ext or "").lower() in EMBED_EXT
+        target = dest if is_embed else dest + ".xmp"
         if not Path(target).exists():
+            if is_embed:
+                # The library file itself is gone (renamed, deleted, volume unmounted). This
+                # is NOT "nothing to strip": the file may well come back still carrying the
+                # old name, so treat it as a failure and keep the alias row.
+                _fail(file_id, dest, "file not found")
+            # else: a sidecar apply has never created holds no keywords - nothing to strip.
             continue
         blocks.append((file_id, dest, ["-P", "-overwrite_original", *remove, target, "-execute"]))
     if not blocks:
-        return 0, []
+        return set(), failed
 
     lines: list[str] = []
     for _fid, _dest, block in blocks:
         lines += block
     res = exiftool_apply_argfile(lines)
     if res.returncode == 0:
-        return len(blocks), []
+        return {fid for fid, _dest, _block in blocks}, failed
 
     print(
         f"  exiftool rc={res.returncode} while stripping '{alias}': retrying its"
         f" {len(blocks)} file(s) individually to find the bad one(s)..."
     )
-    ok = 0
-    failed: list[tuple[int, str]] = []
-    reported = 0
+    ok: set[int] = set()
     for file_id, dest, block in blocks:
         one = exiftool_apply_argfile(block)
         if one.returncode == 0:
-            ok += 1
+            ok.add(file_id)
             continue
-        failed.append((file_id, dest))
-        head = "; ".join((one.stderr or "").strip().splitlines()[:3])
-        log_action(
-            conn, log_fh, run_id, file_id, "enrich_merge_strip_error", f"{alias}: {dest}: {head}"
-        )
-        if reported < MAX_FAILURE_REPORTS:
-            reported += 1
-            print(f"  FAILED to strip '{alias}' (rc={one.returncode}): {dest}")
-            for err in (one.stderr or "").strip().splitlines()[:3]:
-                print(f"    {err}")
+        err_lines = (one.stderr or "").strip().splitlines()
+        _fail(file_id, dest, f"rc={one.returncode}", err_lines)
     if len(failed) > reported:
         print(f"  ... and {len(failed) - reported} more strip failure(s) not shown.")
     return ok, failed
@@ -164,29 +175,45 @@ def cmd_enrich_merge(conn, workdir, run_id, log_fh, args, cfg):
         plans.append((alias, aid, touched))
 
     # Pass 2: strip the old name from the files while the alias is still owned.
-    stripped = 0
-    failures: dict[str, int] = {}
+    stripped_ids: set[int] = set()
+    failures: dict[str, set[int]] = {}
     for alias, _aid, touched in plans:
         if not touched:
             continue
         ok, failed = _strip_alias_keywords(conn, log_fh, run_id, alias, touched, cfg)
-        stripped += ok
+        stripped_ids |= ok  # distinct: one file can carry two aliases
         if failed:
-            failures[alias] = len(failed)
+            failures[alias] = failed
 
-    # Pass 3: repoint the faces, queue a rewrite, and retire the alias rows.
+    # Pass 3: repoint the faces of the stripped files, queue their rewrite, retire the alias.
     moved: list[tuple[str, int]] = []
-    kept: list[tuple[str, int]] = []
+    kept: list[tuple[str, int, int]] = []  # alias, faces left behind, files that failed
     for alias, aid, touched in plans:
+        bad = failures.get(alias, set())
+        # A face whose file still carries the old name STAYS on the alias: that is what makes
+        # the next merge find the file again and retry the strip. Repointing it would leave
+        # the stale keyword behind with nothing pointing at it (the re-run would see zero
+        # faces, delete the row, and the name would be foreign - unremovable - from then on).
+        stay: list[int] = []
+        for file_id in bad:
+            stay += [
+                r["id"]
+                for r in conn.execute(
+                    "SELECT id FROM faces WHERE person_id=? AND file_id=?", (aid, file_id)
+                )
+            ]
         n = conn.execute("UPDATE faces SET person_id=? WHERE person_id=?", (cid, aid)).rowcount
-        for file_id in touched:  # one statement per id: an IN(...) list would trip the
-            conn.execute(  # 32766-variable limit on a large merge
-                "UPDATE enrich_state SET applied_sig=NULL WHERE file_id=?", (file_id,)
-            )
-        if alias in failures:
+        for face_id in stay:  # per-id restore: a NOT IN(...) list would trip the 32766-var cap
+            conn.execute("UPDATE faces SET person_id=? WHERE id=?", (aid, face_id))
+        n -= len(stay)
+        for file_id in touched:  # one statement per id, same reason
+            if file_id in bad:  # unchanged file, unchanged signature
+                continue
+            conn.execute("UPDATE enrich_state SET applied_sig=NULL WHERE file_id=?", (file_id,))
+        if bad:
             # Keep the row: it is what makes the name photoflow's to remove. Deleting it now
             # would leave the old name on those files as a foreign value apply must preserve.
-            kept.append((alias, failures[alias]))
+            kept.append((alias, len(stay), len(bad)))
         else:
             conn.execute("DELETE FROM persons WHERE id=?", (aid,))
         moved.append((alias, n))
@@ -201,21 +228,23 @@ def cmd_enrich_merge(conn, workdir, run_id, log_fh, args, cfg):
         0,
         "enrich_merge",
         f"canonical={canonical} aliases={len(moved)} faces_moved={total} "
-        f"files_stripped={stripped} strip_failed={sum(failures.values())} csv_rows={csv_fixed}",
+        f"files_stripped={len(stripped_ids)} "
+        f"strip_failed={len(set().union(*failures.values()) if failures else set())} "
+        f"csv_rows={csv_fixed}",
     )
     conn.commit()
     print(f"enrich merge: folded {len(moved)} alias(es) into '{canonical}', moved {total} face(s).")
     for alias, n in moved:
         print(f"  {alias} -> {canonical}: {n}")
-    if stripped:
-        print(f"  stripped the old name(s) from {stripped} library file(s).")
+    if stripped_ids:
+        print(f"  stripped the old name(s) from {len(stripped_ids)} library file(s).")
     if csv_fixed:
         print(f"  updated {csv_fixed} row(s) in faces.csv.")
-    for alias, nfail in kept:
+    for alias, nstay, nfail in kept:
         print(
-            f"  kept persons row '{alias}' (strip failed on {nfail} file(s)) so the next enrich"
-            " apply still owns the name and removes it from PersonInImage/HierarchicalSubject;"
-            " fix those files and re-run the merge to drop the row."
+            f"  kept persons row '{alias}' with {nstay} face(s) on {nfail} file(s) whose strip"
+            " failed; fix those files and re-run the merge - it will retry the strip and then"
+            " fold them."
         )
     if total:
         print("Next: photoflow enrich apply (writes the canonical name into regions/people).")
