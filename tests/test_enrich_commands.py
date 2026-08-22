@@ -7,6 +7,7 @@ round-trip marked @pytest.mark.exiftool.
 
 import csv
 import types
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -47,13 +48,13 @@ def _seed(tmp_path: Path, n=3):
     return conn, workdir, lib, ids
 
 
-def _run(fn, conn, workdir, **argkw):
+def _run(fn, conn, workdir, cfg=None, **argkw):
     run_id = new_run(conn, "enrich", {})
     args = types.SimpleNamespace(**argkw)
     logs = workdir / "logs"
     logs.mkdir(exist_ok=True)
     with open(logs / f"run_{run_id}.jsonl", "a", encoding="utf-8") as log_fh:
-        fn(conn, workdir, run_id, log_fh, args, Config())
+        fn(conn, workdir, run_id, log_fh, args, cfg or Config())
 
 
 class FakeDetector:
@@ -580,12 +581,23 @@ def test_apply_rewrites_only_the_file_whose_people_changed(tmp_path, monkeypatch
             r["person"] = "Mother"
     _write_csv(workdir / "faces.csv", FACE_COLS, rows)
 
+    untouched_sig = conn.execute(
+        "SELECT applied_sig FROM enrich_state WHERE file_id=?", (ids[1],)
+    ).fetchone()["applied_sig"]
+
     captured.clear()
     _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
     dests = {r["dest_path"] for r in conn.execute("SELECT id, dest_path FROM files")}
+    assert len(dests) == 2  # the two library files really are distinct write targets
     written = [ln for ln in captured["lines"] if ln in dests]
     changed = conn.execute("SELECT dest_path FROM files WHERE id=?", (ids[0],)).fetchone()
     assert written == [changed["dest_path"]]  # only the changed file was rewritten
+    assert (
+        conn.execute("SELECT applied_sig FROM enrich_state WHERE file_id=?", (ids[1],)).fetchone()[
+            "applied_sig"
+        ]
+        == untouched_sig
+    )
 
 
 def test_apply_dry_run_mutates_nothing(tmp_path, monkeypatch):
@@ -642,6 +654,77 @@ def test_apply_failed_batch_keeps_the_old_signature(tmp_path, monkeypatch, capsy
     assert "failed 1" in out and "not writable" in out
     row = conn.execute("SELECT applied_sig FROM enrich_state").fetchone()
     assert row is None or row["applied_sig"] is None  # never marked applied
+
+
+def test_apply_rewrites_when_write_config_changes(tmp_path, monkeypatch):
+    # The signature must cover the cfg switches that gate real output. Without them, editing
+    # photoflow.toml writes nothing and `--all` is the only (undiscoverable) recovery.
+    conn, workdir, lib, ids = _one_face_file(tmp_path)
+    captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+    assert any(ln.startswith("-XMP-mwg-rs:") for ln in captured["lines"])
+
+    captured.clear()
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+    assert captured.get("lines", []) == []  # same config -> still a no-op
+
+    flipped = replace(Config(), write_mwg_regions=False)
+    _run(eapply.cmd_enrich_apply, conn, workdir, cfg=flipped, dry_run=False, all=False)
+    assert captured["lines"]  # the config change invalidated the signature
+    assert not any(ln.startswith("-XMP-mwg-rs:") for ln in captured["lines"])
+
+
+def test_apply_retries_a_failed_batch_per_file(tmp_path, monkeypatch, capsys):
+    # exiftool keeps going past a bad file and writes the good -execute blocks, so a non-zero
+    # batch rc must not strand the batch's healthy files without an applied_sig forever (they
+    # would be re-read and rewritten on every future run - H10 in miniature).
+    conn, workdir, lib, ids = _one_face_file(tmp_path, n=2)
+    bad = conn.execute("SELECT dest_path FROM files WHERE id=?", (ids[1],)).fetchone()["dest_path"]
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+
+    def flaky(lines):
+        if bad in lines:
+            return ExiftoolResult(returncode=1, stderr=f"Error: {bad} is not writable", stdout="")
+        return ExiftoolResult(0, "", "")
+
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", flaky)
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    out = capsys.readouterr().out
+    assert "written 1" in out and "failed 1" in out
+    good = conn.execute(
+        "SELECT applied_sig FROM enrich_state WHERE file_id=?", (ids[0],)
+    ).fetchone()
+    assert good and good["applied_sig"]  # the healthy file kept its write
+    assert (
+        conn.execute("SELECT applied_sig FROM enrich_state WHERE file_id=?", (ids[1],)).fetchone()
+        is None
+    )
+
+
+def test_apply_creates_a_missing_sidecar_target(tmp_path, monkeypatch, capsys):
+    # A .xmp sidecar that doesn't exist yet has no keywords to clobber, so write it. Counting
+    # it "unreadable" would strand it forever: no rerun and not even --all could create it.
+    conn, workdir, lib, ids = _one_face_file(tmp_path)
+    raw = str(lib / "img0.dng")
+    conn.execute("UPDATE files SET ext='.dng', dest_path=? WHERE id=?", (raw, ids[0]))
+    conn.commit()
+    captured = {}
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {})  # no record for a missing file
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    out = capsys.readouterr().out
+    assert raw + ".xmp" in captured["lines"]
+    assert "skipped-unreadable 0" in out and "written 1" in out
 
 
 @pytest.mark.exiftool
