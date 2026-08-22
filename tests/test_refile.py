@@ -200,3 +200,163 @@ def test_refile_is_wired_into_the_cli(tmp_path: Path):
     out = pf(work, "refile", "--out", str(lib), "--dry-run").stdout
     assert "refile" in out.lower()
     assert q(work, "SELECT COUNT(*) c FROM files")[0]["c"] == 0
+
+
+# --------------------------------------------------------------------------------------
+# Review follow-ups: chained moves, --out sanity, shared dest_path, crash reconcile,
+# rename-majority warning, sidecar partial-row rule.
+# --------------------------------------------------------------------------------------
+
+S8 = "bbbbbbbb"  # shared hash8 -> shared slug+hash8 tail, so dest_for() can chain
+CHAIN_A_OLD = Path("2018") / "08" / "20180813_IMG-1_bbbbbbbb.mov"
+CHAIN_MID = Path("2010") / "09" / "20100904_040331_IMG-1_bbbbbbbb.mov"
+CHAIN_B_NEW = Path("2011") / "03" / "20110315_101112_IMG-1_bbbbbbbb.mov"
+
+
+def empty_lib(tmp_path: Path):
+    work, lib = tmp_path / "work", tmp_path / "lib"
+    lib.mkdir()
+    return work, lib, open_db(work)
+
+
+def actions(conn, name):
+    return conn.execute("SELECT detail FROM actions WHERE action=?", (name,)).fetchall()
+
+
+def test_a_chained_move_never_overwrites_the_file_still_sitting_in_the_target(tmp_path: Path):
+    """A's target is B's current path and B also moves. Pass 2 clears it (B vacates), but
+    pass 3 may run A first - the per-move guard must refuse rather than clobber B."""
+    work, lib, conn = empty_lib(tmp_path)
+    add_row(
+        conn,
+        source_path=r"H:\a\IMG_1.MOV",
+        content_hash=S8 + "1" * 56,
+        date="2010-09-04T04:03:31",  # -> CHAIN_MID, which is B's current home
+        dest_path=lib / CHAIN_A_OLD,
+        body=b"A-CONTENT",
+    )
+    add_row(
+        conn,
+        source_path=r"H:\b\IMG_1.MOV",
+        content_hash=S8 + "2" * 56,
+        date="2011-03-15T10:11:12",  # -> CHAIN_B_NEW
+        dest_path=lib / CHAIN_MID,
+        body=b"B-CONTENT-IRREPLACEABLE",
+    )
+    run_refile(work, lib, conn, dry_run=False)
+
+    bodies = {p.read_bytes() for p in lib.rglob("*.mov")}
+    assert b"B-CONTENT-IRREPLACEABLE" in bodies  # the whole point
+    assert b"A-CONTENT" in bodies
+    assert len(actions(conn, "refile_error")) == 1
+    assert (lib / CHAIN_A_OLD).read_bytes() == b"A-CONTENT"  # A deferred
+    assert (lib / CHAIN_B_NEW).read_bytes() == b"B-CONTENT-IRREPLACEABLE"
+
+    # the next run completes the chain now that the blocker has vacated
+    run_refile(work, lib, conn, dry_run=False)
+    assert (lib / CHAIN_MID).read_bytes() == b"A-CONTENT"
+    assert not (lib / CHAIN_A_OLD).exists()
+    assert dest_of(conn, S8 + "1" * 56) == str(lib / CHAIN_MID)
+
+
+def test_wrong_out_root_is_refused_before_anything_moves(tmp_path: Path):
+    work, lib, conn = make_lib(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    run_id = new_run(conn, "refile", {})
+    with open(work / "refile.jsonl", "w", encoding="utf-8") as fh:
+        with pytest.raises(SystemExit) as e:
+            cmd_refile(
+                conn,
+                work,
+                run_id,
+                fh,
+                SimpleNamespace(out=str(elsewhere), dry_run=False),
+                Config(),
+            )
+    assert "wrong --out" in str(e.value)
+    assert (lib / OLD_REL).exists()
+    assert conn.execute("SELECT dest_path FROM files").fetchone()[0] == str(lib / OLD_REL)
+
+
+def test_a_dest_path_shared_by_two_rows_is_not_vacated_by_one_of_them_moving(tmp_path: Path):
+    """B stays put at P while A (which shares P) moves away; C targeting P is a collision."""
+    work, lib, conn = empty_lib(tmp_path)
+    shared = lib / CHAIN_MID
+    add_row(  # B: dest_for == its current path, so it never moves
+        conn,
+        source_path=r"H:\b\IMG_1.MOV",
+        content_hash=S8 + "1" * 56,
+        date="2010-09-04T04:03:31",
+        dest_path=shared,
+        body=b"B-STAYS-PUT",
+    )
+    add_row(  # A: shares B's dest_path, moves away
+        conn,
+        source_path=r"H:\a\IMG_1.MOV",
+        content_hash=S8 + "2" * 56,
+        date="2011-03-15T10:11:12",
+        dest_path=shared,
+        on_disk=False,
+    )
+    add_row(  # C: elsewhere today, targets the shared path
+        conn,
+        source_path=r"H:\c\IMG_1.MOV",
+        content_hash=S8 + "3" * 56,
+        date="2010-09-04T04:03:31",
+        dest_path=lib / CHAIN_A_OLD,
+        body=b"C-CONTENT",
+    )
+    with pytest.raises(SystemExit) as e:
+        run_refile(work, lib, conn, dry_run=False)
+    assert e.value.code != 0
+    assert shared.read_bytes() == b"B-STAYS-PUT"
+    assert (lib / CHAIN_A_OLD).read_bytes() == b"C-CONTENT"
+    assert dest_of(conn, S8 + "3" * 56) == str(lib / CHAIN_A_OLD)
+
+
+def test_a_file_already_at_its_new_path_is_reconciled_not_reported_missing(tmp_path: Path, capsys):
+    """A run that died between the move and the commit leaves the disk ahead of the manifest."""
+    work, lib, conn = make_lib(tmp_path, sidecar=False)
+    (lib / NEW_REL).parent.mkdir(parents=True)
+    (lib / OLD_REL).rename(lib / NEW_REL)
+    run_refile(work, lib, conn, dry_run=False)
+    out = capsys.readouterr().out
+
+    assert "0 moved" in out and "1 reconciled" in out
+    assert "0 missing" in out and "  missing:" not in out
+    assert conn.execute("SELECT dest_path FROM files").fetchone()[0] == str(lib / NEW_REL)
+    assert len(actions(conn, "refile_reconciled")) == 1
+
+
+def test_a_run_that_is_mostly_pure_renames_warns(tmp_path: Path, capsys):
+    work, lib, conn = empty_lib(tmp_path)
+    add_row(  # same folder, different name -> "name changed"
+        conn,
+        source_path=r"H:\a\IMG_1.MOV",
+        content_hash=S8 + "1" * 56,
+        date="2010-09-04T04:03:31",
+        dest_path=lib / "2010" / "09" / "stale-name_bbbbbbbb.mov",
+    )
+    run_refile(work, lib, conn, dry_run=True)
+    assert "slug_max" in capsys.readouterr().out
+
+
+def test_a_failed_sidecar_move_still_updates_dest_path(tmp_path: Path, capsys, monkeypatch):
+    work, lib, conn = make_lib(tmp_path)
+    real_move = refile_mod._move
+
+    def flaky(src: Path, dst: Path) -> None:
+        if str(src).endswith(".xmp"):
+            raise PermissionError("sidecar is open elsewhere")
+        real_move(src, dst)
+
+    monkeypatch.setattr(refile_mod, "_move", flaky)
+    run_refile(work, lib, conn, dry_run=False)
+    out = capsys.readouterr().out
+
+    assert "1 moved" in out
+    assert (lib / NEW_REL).read_bytes() == b"MOVIEBYTES"  # main file moved
+    assert dest_of(conn, H) == str(lib / NEW_REL)  # manifest follows the main file
+    assert Path(str(lib / OLD_REL) + ".xmp").exists()  # sidecar left behind, not lost
+    assert len(actions(conn, "refile_sidecar_error")) == 1

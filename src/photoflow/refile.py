@@ -44,25 +44,58 @@ def _sidecar(p: Path) -> Path:
     return Path(str(p) + ".xmp")
 
 
+def _guarded_move(old: Path, new: Path) -> None:
+    """Move `old` onto `new`, refusing to clobber anything that is not `old` itself.
+
+    Pass 2 clears a target that another row in this same run is vacating, but it cannot know
+    the ORDER pass 3 runs in: given a chain (A -> B's slot, B -> elsewhere) A may run first,
+    and a bare os.replace would silently destroy B's file while reporting success. This makes
+    that a per-row FileExistsError instead - the row is skipped and logged, and the next run
+    completes the chain once the blocker has actually vacated.
+    """
+    if new.exists() and not old.samefile(new):
+        raise FileExistsError(f"target appeared before this move: {new}")
+    _move(old, new)
+
+
 def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
     out_root = Path(args.out).expanduser().resolve()
     rows = conn.execute(
         "SELECT * FROM files WHERE status='copied' AND dest_path IS NOT NULL ORDER BY id"
     ).fetchall()
 
+    # ---- sanity: --out must be the root these rows were actually copied into. Point it
+    # anywhere else and every single row looks like it needs moving.
+    prefix = str(out_root).casefold() + os.sep
+    if rows and not any((r["dest_path"] or "").casefold().startswith(prefix) for r in rows):
+        sys.exit(f"refile: no copied row's dest_path lies under {out_root} - wrong --out?")
+
     # ---- pass 1: collect every candidate move (nothing touches the disk yet)
     moves: list[tuple[int, Path, Path, str]] = []
     missing: list[str] = []
+    reconciles: list[tuple[int, Path, Path]] = []
+    dests: list[Path] = []  # the effective (post-reconcile) library path of every copied row
     for r in rows:
         old = Path(r["dest_path"])
         new = dest_for(r, out_root, cfg.slug_max)
+        # Path equality is case-insensitive on Windows, so a case-only rename compares equal
+        # and stops here - it never reaches pass 2 or pass 3.
         if old == new:
+            dests.append(old)
             continue
         if not old.exists():
-            missing.append(str(old))
+            if new.exists():
+                # A previous run moved the file but died before committing the UPDATE. The
+                # disk (and the flushed JSONL) are ahead of the manifest; catch it up.
+                reconciles.append((r["id"], old, new))
+                dests.append(new)
+            else:
+                missing.append(str(old))
+                dests.append(old)
             continue
         reason = "folder changed" if old.parent != new.parent else "name changed"
         moves.append((r["id"], old, new, reason))
+        dests.append(old)
 
     # ---- pass 2: pre-flight. Refuse the WHOLE run on any collision; a partial refile with an
     # overwritten library file is unrecoverable, an aborted one costs nothing.
@@ -70,13 +103,17 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
     # says belong to some other copied row that is NOT moving - a different file legitimately
     # lives there, so it is a collision even when the file is missing from disk (moving in
     # would leave two rows sharing one dest_path).
+    owners = Counter(str(d).casefold() for d in dests)
     vacated = set()
     for _fid, old, _new, _reason in moves:
         vacated.add(str(old).casefold())
         vacated.add(str(_sidecar(old)).casefold())
+    # A path two copied rows share is NOT freed when one of them moves away - the other row
+    # still lives there. (`apply` trusts an existing dest and records dest_path on the second
+    # row anyway, so shared dest_paths do occur in real manifests.)
+    vacated = {k for k in vacated if owners[k] <= 1}
     occupied = set()
-    for r in rows:
-        d = Path(r["dest_path"])
+    for d in dests:
         occupied.add(str(d).casefold())
         occupied.add(str(_sidecar(d)).casefold())
     occupied -= vacated
@@ -112,17 +149,32 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
             print(f"  missing: {m}")
         if len(missing) > MISSING_LINES:
             print(f"  ... and {len(missing) - MISSING_LINES} more")
+    if reconciles:
+        print(f"refile: {len(reconciles)} file(s) already at their new path (crashed run?)")
+    if by_reason["name changed"] > len(rows) // 2:
+        print(
+            "WARNING: most moves are pure renames - did slug_max change in photoflow.toml? "
+            "Check the dry-run list before running for real."
+        )
 
     if args.dry_run:
         for _fid, old, new, _reason in moves[:DRY_RUN_LINES]:
             print(f"MOVE {old}  ->  {new}")
         if len(moves) > DRY_RUN_LINES:
+            log_path = getattr(log_fh, "name", None) or str(workdir / "logs")
             print(
                 f"  ... and {len(moves) - DRY_RUN_LINES} more "
-                "(run without --dry-run to see the audit log)"
+                f"(a real run records every move in {log_path})"
             )
         print(f"refile dry-run: {len(moves)} would move ({summary}).")
         return
+
+    for fid, old, new in reconciles:
+        conn.execute("UPDATE files SET dest_path=? WHERE id=?", (str(new), fid))
+        log_action(conn, log_fh, run_id, fid, "refile_reconciled", f"{old} -> {new} (was moved)")
+    if reconciles:
+        conn.commit()
+        log_fh.flush()
 
     # ---- pass 3: execute. Every row is isolated: one locked/AV-held file must not abort a run
     # that has already moved thousands of others.
@@ -130,32 +182,37 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
     # Partial-row rule: the MAIN file moves first. If it lands but the .xmp sidecar move then
     # fails, dest_path is still updated (the main file HAS moved, so the manifest must follow)
     # and a `refile_sidecar_error` action records the orphaned sidecar for manual re-pairing.
+    #
+    # The JSONL log is flushed per row so it stays authoritative if the process is killed
+    # between commits; the next run reconciles the manifest against what is on disk.
     moved = sidecars = failed = 0
     for fid, old, new, _reason in moves:
         try:
-            _move(old, new)
+            _guarded_move(old, new)
         except OSError as e:
             print(f"  error: {old}: {e}")
             log_action(conn, log_fh, run_id, fid, "refile_error", str(e))
+            log_fh.flush()
             failed += 1
             continue
         old_sc, new_sc = _sidecar(old), _sidecar(new)
         if old_sc.exists():
             try:
-                _move(old_sc, new_sc)
+                _guarded_move(old_sc, new_sc)
                 sidecars += 1
             except OSError as e:
                 print(f"  error: {old_sc}: {e}")
                 log_action(conn, log_fh, run_id, fid, "refile_sidecar_error", f"{old_sc}: {e}")
         conn.execute("UPDATE files SET dest_path=? WHERE id=?", (str(new), fid))
         log_action(conn, log_fh, run_id, fid, "refiled", f"{old} -> {new}")
+        log_fh.flush()
         moved += 1
         if moved % COMMIT_EVERY == 0:
             conn.commit()
             print(f"  refiled {moved}/{len(moves)}...")
     conn.commit()
     print(
-        f"refile complete: {moved} moved ({summary}), {sidecars} sidecars, "
-        f"{failed} failed, {len(missing)} missing. "
+        f"refile complete: {moved} moved ({summary}), {sidecars} sidecars, {failed} failed, "
+        f"{len(reconciles)} reconciled, {len(missing)} missing. "
         "Rescan your external library (Immich/digiKam) afterwards."
     )
