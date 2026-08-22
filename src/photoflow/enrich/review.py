@@ -102,6 +102,7 @@ def cmd_enrich_review(conn, workdir, run_id, log_fh, args, cfg):
             noise.append(m)
 
     blacklist = {r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")}
+    excluded_by_blacklist = 0
 
     tagthumbs = workdir / "tagthumbs"
     tag_items: list = []
@@ -110,7 +111,8 @@ def cmd_enrich_review(conn, workdir, run_id, log_fh, args, cfg):
            FROM tags t JOIN files f ON f.id = t.file_id WHERE t.status='review' ORDER BY t.tag"""
     ):
         if r["tag"] in blacklist:
-            continue  # a blacklisted tag is never written, so don't spend review time on it
+            excluded_by_blacklist += 1  # never written, so don't spend review time on it
+            continue
         thumb_rel = None
         if r["dest_path"]:
             tagthumbs.mkdir(exist_ok=True)
@@ -130,15 +132,25 @@ def cmd_enrich_review(conn, workdir, run_id, log_fh, args, cfg):
                 "source_path": r["dest_path"],
             }
         )
-    auto_items = [
-        {"file_id": r["file_id"], "tag": r["tag"], "suggestion": "auto"}
-        for r in conn.execute("SELECT file_id, tag FROM tags WHERE status='auto'")
-        if r["tag"] not in blacklist
-    ]
+    auto_items: list = []
+    for r in conn.execute("SELECT file_id, tag FROM tags WHERE status='auto'"):
+        if r["tag"] in blacklist:
+            excluded_by_blacklist += 1
+            continue
+        auto_items.append({"file_id": r["file_id"], "tag": r["tag"], "suggestion": "auto"})
 
     if not clusters and not noise and not tag_items:
-        print("enrich review: nothing to review yet (run enrich scan + enrich cluster first).")
-        return
+        if excluded_by_blacklist:
+            # Don't return here: faces.csv/tags.csv (with the '*' rows) + the HTML still need to
+            # be (re)written so the blacklist carries forward to `enrich apply` and the next
+            # `enrich review`, even though there is nothing left needing a human decision.
+            print(
+                f"enrich review: nothing to review ({excluded_by_blacklist} tag(s) excluded by "
+                "the blacklist)"
+            )
+        else:
+            print("enrich review: nothing to review yet (run enrich scan + enrich cluster first).")
+            return
 
     f_rows = face_rows(clusters, noise, prior_faces)
     t_rows = tag_rows(tag_items, _read_prior_tags(workdir / "tags.csv")) + blacklist_rows(

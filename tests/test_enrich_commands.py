@@ -1668,8 +1668,22 @@ def test_apply_never_writes_a_db_blacklisted_tag(tmp_path, monkeypatch):
     )
     conn.commit()
     _write_csv(workdir / "faces.csv", FACE_COLS, [])
+    # tags.csv carries the '*' row a real `enrich review` would have re-emitted for the DB
+    # blacklist (page.py:blacklist_rows) - an EMPTY tags.csv here would mean "un-blacklist
+    # person" under the new authoritative-CSV rule, which is covered by its own test.
     _write_csv(
-        workdir / "tags.csv", ["file_id", "tag", "source", "score", "suggestion", "decision"], []
+        workdir / "tags.csv",
+        ["file_id", "tag", "source", "score", "suggestion", "decision"],
+        [
+            {
+                "file_id": "*",
+                "tag": "person",
+                "source": "",
+                "score": "",
+                "suggestion": "auto",
+                "decision": "reject",
+            }
+        ],
     )
     captured = {}
     monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
@@ -1680,6 +1694,7 @@ def test_apply_never_writes_a_db_blacklisted_tag(tmp_path, monkeypatch):
 
     assert "-XMP-dc:Subject=beach" in captured["lines"]
     assert "-XMP-dc:Subject=person" not in captured["lines"]
+    assert [r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")] == ["person"]
 
 
 def test_review_carries_the_blacklist_forward(tmp_path):
@@ -1704,6 +1719,113 @@ def test_review_carries_the_blacklist_forward(tmp_path):
     assert all(r["tag"] != "person" for r in rows if r["file_id"] != "*")  # not up for review
     html = (workdir / "enrich_review.html").read_text(encoding="utf-8")
     assert "TAGS.blacklist" in html and '"person"' in html
+
+
+def test_apply_removes_a_tag_from_the_db_blacklist_when_absent_from_csv(tmp_path, monkeypatch):
+    # Un-blacklisting: tags.csv is authoritative for the blacklist once it exists. Review
+    # re-emits every DB-blacklisted tag as a '*' row and the page always writes back the whole
+    # current Set, so a DB-blacklisted tag with no '*' row in tags.csv means the user cleared it.
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    conn.execute("INSERT INTO tag_blacklist(tag, ts) VALUES ('person','')")
+    conn.execute(
+        "INSERT INTO tags(file_id, tag, source, score, status) VALUES (?,?,?,?,?)",
+        (fid, "person", "clip", 0.9, "auto"),
+    )
+    conn.commit()
+    _write_csv(workdir / "faces.csv", FACE_COLS, [])
+    _write_csv(
+        workdir / "tags.csv", ["file_id", "tag", "source", "score", "suggestion", "decision"], []
+    )
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool({}))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    assert conn.execute("SELECT COUNT(*) c FROM tag_blacklist").fetchone()["c"] == 0
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) c FROM actions WHERE action='tag_unblacklisted' AND detail='person'"
+        ).fetchone()["c"]
+        == 1
+    )
+
+
+def test_apply_leaves_the_db_blacklist_alone_when_tags_csv_is_missing(tmp_path, monkeypatch):
+    # A never-reviewed (or deleted) tags.csv must never be read as "the user cleared the
+    # blacklist" - that would silently un-blacklist every tag on a library that hasn't been
+    # reviewed since C6 landed.
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    conn.execute("INSERT INTO tag_blacklist(tag, ts) VALUES ('person','')")
+    conn.execute(
+        "INSERT INTO tags(file_id, tag, source, score, status) VALUES (?,?,?,?,?)",
+        (fid, "person", "clip", 0.9, "auto"),
+    )
+    conn.commit()
+    _write_csv(workdir / "faces.csv", FACE_COLS, [])
+    assert not (workdir / "tags.csv").exists()
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool({}))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    assert [r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")] == ["person"]
+
+
+def test_apply_dry_run_does_not_unblacklist(tmp_path, monkeypatch):
+    # R2 extended to un-blacklisting: a dry run must not durably delete from tag_blacklist
+    # either - the whole command's mutations roll back together.
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    conn.execute("INSERT INTO tag_blacklist(tag, ts) VALUES ('person','')")
+    conn.execute(
+        "INSERT INTO tags(file_id, tag, source, score, status) VALUES (?,?,?,?,?)",
+        (fid, "person", "clip", 0.9, "auto"),
+    )
+    conn.commit()
+    _write_csv(workdir / "faces.csv", FACE_COLS, [])
+    _write_csv(
+        workdir / "tags.csv", ["file_id", "tag", "source", "score", "suggestion", "decision"], []
+    )
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool({}))
+
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=True, all=False)
+
+    assert [r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")] == ["person"]
+    unblacklisted = conn.execute(
+        "SELECT COUNT(*) c FROM actions WHERE action='tag_unblacklisted'"
+    ).fetchone()["c"]
+    assert unblacklisted == 0
+
+
+def test_review_reports_and_still_writes_when_only_a_blacklist_excludes_everything(
+    tmp_path, capsys
+):
+    # The blacklist made everything reviewable disappear -> the old "run enrich scan + enrich
+    # cluster first" message was misleading (scan/cluster HAD run), and returning before writing
+    # meant the '*' row never made it back into tags.csv/the page for this run.
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    conn.execute("INSERT INTO tag_blacklist(tag, ts) VALUES ('person','')")
+    conn.execute(
+        "INSERT INTO tags(file_id, tag, source, score, status) VALUES (?,?,?,?,?)",
+        (fid, "person", "clip", 0.9, "auto"),
+    )
+    conn.commit()
+
+    _run(ereview.cmd_enrich_review, conn, workdir)
+
+    out = capsys.readouterr().out
+    assert "nothing to review (1 tag(s) excluded by the blacklist)" in out
+    assert "run enrich scan + enrich cluster first" not in out
+    rows = list(csv.DictReader((workdir / "tags.csv").open(encoding="utf-8")))
+    assert [r["tag"] for r in rows if r["file_id"] == "*"] == ["person"]
+    assert (workdir / "enrich_review.html").exists()
 
 
 # ------------------------------------------------------- scan commit cadence on open failures

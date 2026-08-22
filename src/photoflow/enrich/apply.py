@@ -87,7 +87,9 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
         print("enrich apply: exiftool not found on PATH - nothing written.")
         return
     face_csv = _read_csv(workdir / "faces.csv")
-    tag_csv = _read_csv(workdir / "tags.csv")
+    tags_csv_path = workdir / "tags.csv"
+    tags_csv_exists = tags_csv_path.exists()
+    tag_csv = _read_csv(tags_csv_path)
     now = datetime.now().isoformat(timespec="seconds")
 
     # 1. make person assignments durable (faces.person_id).
@@ -123,13 +125,38 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
                 )
     # 2. tag decision overlay: blacklist wildcards (durable in tag_blacklist + this run's CSV
     # rows) and per-(file,tag) review decisions.
+    #
+    # tags.csv is authoritative for the blacklist WHEN IT EXISTS: `enrich review` re-emits every
+    # DB-blacklisted tag as a `*`/reject row (page.py:blacklist_rows), and the page's tagsCsv()
+    # always writes a `*` row for every tag currently in its in-page blacklist Set - not just
+    # newly added ones. So a tag the DB still has but the CSV's `*` rows no longer mention was
+    # deliberately un-blacklisted by the user, and apply must delete it from tag_blacklist
+    # (there was previously no path to remove a tag once blacklisted - csv ∪ db only grew).
+    # A MISSING tags.csv (never reviewed yet, or the file was deleted) must never be read as
+    # "the user cleared everything", so that case keeps the old DB-only behavior untouched.
+    #
+    # Known limitation (backlog): this only stops FUTURE writes. A tag already embedded in a
+    # file's dc:Subject before it was blacklisted is not retroactively stripped - the keyword
+    # write below is a read-union-replace, never a delete. `keyword_remove_argfile_lines`
+    # (regions.py, added for `merge`) already has the exiftool plumbing for a future
+    # `enrich apply --strip-blacklisted` / `enrich unblacklist --strip`.
     csv_blacklist = {
         r["tag"] for r in tag_csv if str(r.get("file_id")) == "*" and r.get("decision") == "reject"
     }
     db_blacklist = {r["tag"] for r in conn.execute("SELECT tag FROM tag_blacklist")}
     for t in sorted(csv_blacklist - db_blacklist):
         conn.execute("INSERT OR IGNORE INTO tag_blacklist(tag, ts) VALUES (?,?)", (t, now))
-    blacklist = csv_blacklist | db_blacklist
+    if tags_csv_exists:
+        un_blacklisted = db_blacklist - csv_blacklist
+        for t in sorted(un_blacklisted):
+            conn.execute("DELETE FROM tag_blacklist WHERE tag=?", (t,))
+            log_action(conn, log_fh, run_id, 0, "tag_unblacklisted", t)
+        if un_blacklisted:
+            names = ", ".join(sorted(un_blacklisted))
+            print(f"  un-blacklisted {len(un_blacklisted)} tag(s): {names}")
+        blacklist = csv_blacklist
+    else:
+        blacklist = csv_blacklist | db_blacklist
     review_dec = {
         (str(r["file_id"]), r["tag"]): (r.get("decision") or "")
         for r in tag_csv
