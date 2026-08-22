@@ -571,15 +571,14 @@ def test_apply_rewrites_only_the_file_whose_people_changed(tmp_path, monkeypatch
     monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool(captured))
     _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
 
-    # rename the person on ONE file only, the way the review page delivers it: a new name in
-    # faces.csv for that one face. (A bare UPDATE of faces.person_id would be undone by step 1,
-    # which re-applies faces.csv over the DB on every run.)
+    # rename the person on ONE file only. A rename is a DB-side operation (`enrich merge`);
+    # step 1 only ever grants a FIRST name from faces.csv, so the stale keep row naming the
+    # face "Mum" no longer overwrites this (R8).
     target = conn.execute("SELECT id FROM faces WHERE file_id=?", (ids[0],)).fetchone()["id"]
-    rows = list(csv.DictReader((workdir / "faces.csv").open(encoding="utf-8")))
-    for r in rows:
-        if int(r["face_id"]) == target:
-            r["person"] = "Mother"
-    _write_csv(workdir / "faces.csv", FACE_COLS, rows)
+    conn.execute("INSERT INTO persons(name, created) VALUES ('Mother','')")
+    mother = conn.execute("SELECT id FROM persons WHERE name='Mother'").fetchone()["id"]
+    conn.execute("UPDATE faces SET person_id=? WHERE id=?", (mother, target))
+    conn.commit()
 
     untouched_sig = conn.execute(
         "SELECT applied_sig FROM enrich_state WHERE file_id=?", (ids[1],)
@@ -948,6 +947,241 @@ def test_merge_ignores_unknown_or_self_alias(tmp_path):
     conn.commit()
     _run(emerge.cmd_enrich_merge, conn, workdir, canonical="Mum", aliases=["Mum", "Nobody"])
     assert {r["name"] for r in conn.execute("SELECT name FROM persons")} == {"Mum"}  # unchanged
+
+
+def _named_library_file(tmp_path, name):
+    """One library file whose single face is assigned to `name`, already applied."""
+    conn, workdir, lib, ids = _seed(tmp_path, n=1)
+    fid = ids[0]
+    conn.execute("INSERT INTO persons(name, created) VALUES (?, '')", (name,))
+    pid = conn.execute("SELECT id FROM persons WHERE name=?", (name,)).fetchone()["id"]
+    _insert_face(conn, fid, which=0, person_id=pid)
+    conn.execute(
+        "INSERT INTO enrich_state(file_id, applied, applied_sig, ts) VALUES (?,1,'deadbeef','')",
+        (fid,),
+    )
+    conn.commit()
+    return conn, workdir, lib, fid
+
+
+def test_merge_invalidates_applied_sig_for_touched_files(tmp_path, monkeypatch):
+    conn, workdir, lib, fid = _named_library_file(tmp_path, "Deidre Hough")
+    captured = {}
+    monkeypatch.setattr(emerge, "exiftool_available", lambda: True)
+    monkeypatch.setattr(emerge, "exiftool_apply_argfile", _fake_exiftool(captured))
+
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Deirdre Hough",
+        aliases=["Deidre Hough"],
+    )
+
+    # the stale name is stripped from the file...
+    assert "-XMP-dc:Subject-=Deidre Hough" in captured["lines"]
+    assert "-XMP-iptcExt:PersonInImage-=Deidre Hough" in captured["lines"]
+    assert "-P" in captured["lines"] and "-overwrite_original" in captured["lines"]
+    # ...and the file is queued for a rewrite so regions/PersonInImage get the new name
+    row = conn.execute("SELECT applied_sig FROM enrich_state WHERE file_id=?", (fid,)).fetchone()
+    assert row["applied_sig"] is None
+    assert {r["name"] for r in conn.execute("SELECT name FROM persons")} == {"Deirdre Hough"}
+
+
+def test_merge_rewrites_faces_csv_in_place(tmp_path, monkeypatch):
+    conn, workdir, lib, fid = _named_library_file(tmp_path, "Deidre Hough")
+    face_id = conn.execute("SELECT id FROM faces").fetchone()["id"]
+    _write_csv(
+        workdir / "faces.csv",
+        FACE_COLS,
+        [_face_row(1, face_id, fid, person="Deidre Hough", decision="keep")],
+    )
+    monkeypatch.setattr(emerge, "exiftool_available", lambda: True)
+    monkeypatch.setattr(emerge, "exiftool_apply_argfile", _fake_exiftool({}))
+
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Deirdre Hough",
+        aliases=["Deidre Hough"],
+    )
+
+    rows = list(csv.DictReader((workdir / "faces.csv").open(encoding="utf-8")))
+    assert [r["person"] for r in rows] == ["Deirdre Hough"]
+
+
+def test_merge_aborts_without_exiftool(tmp_path, monkeypatch, capsys):
+    # The strip is what makes the rename removable at all: once the alias persons row is gone
+    # the name reads as foreign and apply preserves it forever. No exiftool -> change nothing.
+    conn, workdir, lib, fid = _named_library_file(tmp_path, "Deidre Hough")
+    monkeypatch.setattr(emerge, "exiftool_available", lambda: False)
+
+    def _boom(lines):  # pragma: no cover - must never be reached
+        raise AssertionError("exiftool must not run when it is unavailable")
+
+    monkeypatch.setattr(emerge, "exiftool_apply_argfile", _boom)
+
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Deirdre Hough",
+        aliases=["Deidre Hough"],
+    )
+
+    out = capsys.readouterr().out
+    assert "exiftool not found on PATH" in out
+    assert {r["name"] for r in conn.execute("SELECT name FROM persons")} == {"Deidre Hough"}
+    named = conn.execute("SELECT COUNT(*) c FROM faces WHERE person_id IS NOT NULL").fetchone()
+    assert named["c"] == 1
+    assert (
+        conn.execute("SELECT applied_sig FROM enrich_state WHERE file_id=?", (fid,)).fetchone()[
+            "applied_sig"
+        ]
+        == "deadbeef"
+    )
+
+
+def test_merge_keeps_alias_row_when_strip_fails(tmp_path, monkeypatch, capsys):
+    # If the old name could not be removed from the file, the persons row has to stay: it is
+    # the only thing that makes the name "ours" and therefore removable by a later apply.
+    conn, workdir, lib, fid = _named_library_file(tmp_path, "Deidre Hough")
+    face_id = conn.execute("SELECT id FROM faces").fetchone()["id"]
+    monkeypatch.setattr(emerge, "exiftool_available", lambda: True)
+    monkeypatch.setattr(
+        emerge, "exiftool_apply_argfile", lambda lines: ExiftoolResult(1, "Error: locked", "")
+    )
+
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Deirdre Hough",
+        aliases=["Deidre Hough"],
+    )
+
+    out = capsys.readouterr().out
+    assert "kept persons row" in out
+    names = {r["name"] for r in conn.execute("SELECT name FROM persons")}
+    assert names == {"Deirdre Hough", "Deidre Hough"}  # the alias row survives
+    canonical = conn.execute("SELECT id FROM persons WHERE name='Deirdre Hough'").fetchone()["id"]
+    assert (
+        conn.execute("SELECT person_id FROM faces WHERE id=?", (face_id,)).fetchone()["person_id"]
+        == canonical
+    )
+    assert (
+        conn.execute("SELECT applied_sig FROM enrich_state WHERE file_id=?", (fid,)).fetchone()[
+            "applied_sig"
+        ]
+        is None
+    )
+    acts = [
+        r["action"]
+        for r in conn.execute("SELECT action FROM actions WHERE action='enrich_merge_strip_error'")
+    ]
+    assert acts == ["enrich_merge_strip_error"]
+
+
+def test_merge_drops_a_faceless_alias_row(tmp_path, monkeypatch):
+    # Re-running a merge whose strip failed: the faces are already repointed, so there is
+    # nothing to strip and the leftover alias row is simply dropped.
+    conn, workdir, lib, fid = _named_library_file(tmp_path, "Deirdre Hough")
+    conn.execute("INSERT INTO persons(name, created) VALUES ('Deidre Hough','')")
+    conn.commit()
+    captured = {}
+    monkeypatch.setattr(emerge, "exiftool_available", lambda: True)
+    monkeypatch.setattr(emerge, "exiftool_apply_argfile", _fake_exiftool(captured))
+
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Deirdre Hough",
+        aliases=["Deidre Hough"],
+    )
+
+    assert {r["name"] for r in conn.execute("SELECT name FROM persons")} == {"Deirdre Hough"}
+    assert captured.get("lines", []) == []  # no file had the alias -> no exiftool write
+
+
+def test_apply_with_a_stale_csv_does_not_resurrect_a_merged_alias(tmp_path, monkeypatch):
+    # R8: merge deletes the alias person row, then apply replayed the old faces.csv keep row
+    # and re-created it, repointing the faces back.
+    conn, workdir, lib, fid = _named_library_file(tmp_path, "Deidre Hough")
+    face_id = conn.execute("SELECT id FROM faces").fetchone()["id"]
+    monkeypatch.setattr(emerge, "exiftool_available", lambda: True)
+    monkeypatch.setattr(emerge, "exiftool_apply_argfile", _fake_exiftool({}))
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Deirdre Hough",
+        aliases=["Deidre Hough"],
+    )
+
+    # simulate a stale CSV coming back (restored from the page's localStorage, or a backup)
+    _write_csv(
+        workdir / "faces.csv",
+        FACE_COLS,
+        [_face_row(1, face_id, fid, person="Deidre Hough", decision="keep")],
+    )
+    _write_csv(
+        workdir / "tags.csv", ["file_id", "tag", "source", "score", "suggestion", "decision"], []
+    )
+    monkeypatch.setattr(eapply, "exiftool_available", lambda: True)
+    monkeypatch.setattr(eapply, "read_keywords", lambda paths: {p: set() for p in paths})
+    monkeypatch.setattr(eapply, "exiftool_apply_argfile", _fake_exiftool({}))
+    _run(eapply.cmd_enrich_apply, conn, workdir, dry_run=False, all=False)
+
+    assert {r["name"] for r in conn.execute("SELECT name FROM persons")} == {"Deirdre Hough"}
+    pid = conn.execute("SELECT person_id FROM faces WHERE id=?", (face_id,)).fetchone()
+    canonical = conn.execute("SELECT id FROM persons").fetchone()["id"]
+    assert pid["person_id"] == canonical
+
+
+@pytest.mark.exiftool
+def test_merge_removes_the_alias_from_the_real_file(tmp_path):
+    import json
+    import subprocess
+
+    conn, workdir, lib, fid = _named_library_file(tmp_path, "Deidre Hough")
+    dest = conn.execute("SELECT dest_path FROM files WHERE id=?", (fid,)).fetchone()["dest_path"]
+    subprocess.run(
+        [
+            "exiftool",
+            "-overwrite_original",
+            "-XMP-dc:Subject=Deidre Hough",
+            "-XMP-dc:Subject=beach",
+            "-XMP-iptcExt:PersonInImage=Deidre Hough",
+            dest,
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+    _run(
+        emerge.cmd_enrich_merge,
+        conn,
+        workdir,
+        canonical="Deirdre Hough",
+        aliases=["Deidre Hough"],
+    )
+
+    rec = json.loads(
+        subprocess.run(
+            ["exiftool", "-j", "-XMP-dc:Subject", "-XMP-iptcExt:PersonInImage", dest],
+            capture_output=True,
+            text=True,
+        ).stdout
+    )[0]
+
+    def as_list(v):
+        return [v] if isinstance(v, str) else (v or [])
+
+    assert "Deidre Hough" not in as_list(rec.get("Subject"))
+    assert "beach" in as_list(rec.get("Subject"))  # other keywords untouched
+    assert "Deidre Hough" not in as_list(rec.get("PersonInImage"))
 
 
 # ----------------------------------------------------- "not interested" faces stay gone

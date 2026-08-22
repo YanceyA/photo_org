@@ -90,11 +90,21 @@ def cmd_enrich_apply(conn, workdir, run_id, log_fh, args, cfg):
     tag_csv = _read_csv(workdir / "tags.csv")
     now = datetime.now().isoformat(timespec="seconds")
 
-    # 1. make person assignments durable (faces.person_id)
+    # 1. make person assignments durable (faces.person_id).
+    # A CSV keep row only ever grants a FIRST name: enrich review emits faces with
+    # person_id IS NULL only, so a named face never appears in faces.csv and a CSV row can
+    # never legitimately rename one. Renames go through `enrich merge`. Guarding on
+    # person_id IS NULL (and skipping the person upsert entirely) stops a stale CSV from
+    # re-creating a merged-away alias and repointing its faces back (R8).
     for row in face_csv:
-        if face_is_applied(row.get("person", ""), row.get("decision", "")):
-            pid = _upsert_person(conn, row["person"].strip())
-            conn.execute("UPDATE faces SET person_id=? WHERE id=?", (pid, int(row["face_id"])))
+        if not face_is_applied(row.get("person", ""), row.get("decision", "")):
+            continue
+        face_id = int(row["face_id"])
+        cur = conn.execute("SELECT person_id FROM faces WHERE id=?", (face_id,)).fetchone()
+        if cur is None or cur["person_id"] is not None:
+            continue
+        pid = _upsert_person(conn, row["person"].strip())
+        conn.execute("UPDATE faces SET person_id=? WHERE id=?", (pid, face_id))
 
     # 1b. "not interested" clusters: a cluster whose every member is skipped (none named) was
     # dismissed wholesale in the page -> mark its faces ignored so re-cluster/review drop them
