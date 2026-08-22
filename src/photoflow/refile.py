@@ -44,6 +44,15 @@ def _sidecar(p: Path) -> Path:
     return Path(str(p) + ".xmp")
 
 
+def _root_prefix(root: Path) -> str:
+    """Casefolded `root` with exactly one trailing separator, for startswith() containment.
+
+    os.path.join does the right thing at a drive or UNC root, where str(root) already ends in
+    a separator and a naive `str(root) + os.sep` would double it (`E:\\` -> `E:\\\\`).
+    """
+    return os.path.join(str(root), "").casefold()
+
+
 def _guarded_move(old: Path, new: Path) -> None:
     """Move `old` onto `new`, refusing to clobber anything that is not `old` itself.
 
@@ -66,7 +75,7 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
 
     # ---- sanity: --out must be the root these rows were actually copied into. Point it
     # anywhere else and every single row looks like it needs moving.
-    prefix = str(out_root).casefold() + os.sep
+    prefix = _root_prefix(out_root)
     if rows and not any((r["dest_path"] or "").casefold().startswith(prefix) for r in rows):
         sys.exit(f"refile: no copied row's dest_path lies under {out_root} - wrong --out?")
 
@@ -169,7 +178,21 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
         print(f"refile dry-run: {len(moves)} would move ({summary}).")
         return
 
+    moved = sidecars = failed = 0
+    done_reasons: Counter[str] = Counter()
+
     for fid, old, new in reconciles:
+        # The crash may have landed BETWEEN the main move and the sidecar move, leaving the
+        # .xmp at the old path. Finish that here: once dest_path points at `new`, pass 1
+        # short-circuits on `old == new` and no future run would ever look for it again.
+        old_sc, new_sc = _sidecar(old), _sidecar(new)
+        if old_sc.exists() and not new_sc.exists():
+            try:
+                _guarded_move(old_sc, new_sc)
+                sidecars += 1
+            except OSError as e:
+                print(f"  error: {old_sc}: {e}")
+                log_action(conn, log_fh, run_id, fid, "refile_sidecar_error", f"{old_sc}: {e}")
         conn.execute("UPDATE files SET dest_path=? WHERE id=?", (str(new), fid))
         log_action(conn, log_fh, run_id, fid, "refile_reconciled", f"{old} -> {new} (was moved)")
     if reconciles:
@@ -185,8 +208,7 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
     #
     # The JSONL log is flushed per row so it stays authoritative if the process is killed
     # between commits; the next run reconciles the manifest against what is on disk.
-    moved = sidecars = failed = 0
-    for fid, old, new, _reason in moves:
+    for fid, old, new, reason in moves:
         try:
             _guarded_move(old, new)
         except OSError as e:
@@ -206,13 +228,17 @@ def cmd_refile(conn, workdir, run_id, log_fh, args, cfg):
         conn.execute("UPDATE files SET dest_path=? WHERE id=?", (str(new), fid))
         log_action(conn, log_fh, run_id, fid, "refiled", f"{old} -> {new}")
         log_fh.flush()
+        done_reasons[reason] += 1
         moved += 1
         if moved % COMMIT_EVERY == 0:
             conn.commit()
             print(f"  refiled {moved}/{len(moves)}...")
     conn.commit()
+    # Report what actually happened - `summary` counts PLANNED moves, so quoting it here next
+    # to a non-zero `failed` reads as a contradiction ("1 moved (folder changed: 2)").
+    done = ", ".join(f"{k}: {v}" for k, v in sorted(done_reasons.items())) or "none"
     print(
-        f"refile complete: {moved} moved ({summary}), {sidecars} sidecars, {failed} failed, "
+        f"refile complete: {moved} moved ({done}), {sidecars} sidecars, {failed} failed, "
         f"{len(reconciles)} reconciled, {len(missing)} missing. "
         "Rescan your external library (Immich/digiKam) afterwards."
     )

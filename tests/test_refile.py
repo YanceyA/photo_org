@@ -1,5 +1,6 @@
 """refile: move already-copied library files to the dest their corrected date implies."""
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -223,7 +224,9 @@ def actions(conn, name):
     return conn.execute("SELECT detail FROM actions WHERE action=?", (name,)).fetchall()
 
 
-def test_a_chained_move_never_overwrites_the_file_still_sitting_in_the_target(tmp_path: Path):
+def test_a_chained_move_never_overwrites_the_file_still_sitting_in_the_target(
+    tmp_path: Path, capsys
+):
     """A's target is B's current path and B also moves. Pass 2 clears it (B vacates), but
     pass 3 may run A first - the per-move guard must refuse rather than clobber B."""
     work, lib, conn = empty_lib(tmp_path)
@@ -244,6 +247,9 @@ def test_a_chained_move_never_overwrites_the_file_still_sitting_in_the_target(tm
         body=b"B-CONTENT-IRREPLACEABLE",
     )
     run_refile(work, lib, conn, dry_run=False)
+
+    # the summary counts rows that actually moved, so it must not contradict "1 failed"
+    assert "1 moved (folder changed: 1)" in capsys.readouterr().out
 
     bodies = {p.read_bytes() for p in lib.rglob("*.mov")}
     assert b"B-CONTENT-IRREPLACEABLE" in bodies  # the whole point
@@ -360,3 +366,33 @@ def test_a_failed_sidecar_move_still_updates_dest_path(tmp_path: Path, capsys, m
     assert dest_of(conn, H) == str(lib / NEW_REL)  # manifest follows the main file
     assert Path(str(lib / OLD_REL) + ".xmp").exists()  # sidecar left behind, not lost
     assert len(actions(conn, "refile_sidecar_error")) == 1
+
+
+_ROOTS = ["E:/", "//nas/photos", "E:/Photos"] if os.name == "nt" else ["/", "/mnt/photos"]
+
+
+@pytest.mark.parametrize("root", _ROOTS)
+def test_root_prefix_ends_with_exactly_one_separator(root: str):
+    """A drive or UNC root already ends in a separator; `str(root) + os.sep` would double it
+    and the --out guard would then reject every legitimate run against that root."""
+    prefix = refile_mod._root_prefix(Path(root))
+    assert prefix.endswith(os.sep)
+    assert not prefix.endswith(os.sep + os.sep)
+    assert prefix == prefix.casefold()
+    assert str(Path(root) / "2010" / "x.mov").casefold().startswith(prefix)
+
+
+def test_reconcile_also_brings_the_sidecar_across(tmp_path: Path, capsys):
+    """A crash between the main move and the sidecar move strands the .xmp at the old path -
+    and once dest_path is reconciled, pass 1 short-circuits and nobody looks for it again."""
+    work, lib, conn = make_lib(tmp_path)
+    (lib / NEW_REL).parent.mkdir(parents=True)
+    (lib / OLD_REL).rename(lib / NEW_REL)  # main file only; .xmp left behind
+    assert Path(str(lib / OLD_REL) + ".xmp").exists()
+
+    run_refile(work, lib, conn, dry_run=False)
+
+    assert "1 reconciled" in capsys.readouterr().out
+    assert Path(str(lib / NEW_REL) + ".xmp").read_text(encoding="utf-8") == "<x/>"
+    assert not Path(str(lib / OLD_REL) + ".xmp").exists()
+    assert dest_of(conn, H) == str(lib / NEW_REL)
