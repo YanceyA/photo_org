@@ -113,3 +113,38 @@ def test_library_mtime_equals_source_mtime(tmp_path: Path):
     dest = Path(q(work, "SELECT dest_path FROM files")[0]["dest_path"])
     assert dest.suffix == ".jpg" and dest.exists()
     assert abs(dest.stat().st_mtime - OLD_MTIME) < 2  # FAT/exFAT tolerance
+
+
+def test_sidecars_are_not_copied_into_the_library(photo_fixture: Path, tmp_path: Path):
+    """.thm/.aae/.xmp are not photos: copying them littered the library with standalone
+    'assets', each with its own bogus .thm.xmp provenance sidecar (review finding H5)."""
+    work, lib = tmp_path / "work", tmp_path / "library"
+    pf(work, "scan", str(photo_fixture))
+    pf(work, "plan")
+    pf(work, "apply", "--out", str(lib))
+
+    names = [p.name.lower() for p in lib.rglob("*") if p.is_file()]
+    assert not [n for n in names if n.endswith(".thm")]
+    assert not [n for n in names if n.endswith(".thm.xmp")]
+    # the only .xmp left is the provenance sidecar apply writes for the RAW keeper
+    assert [n for n in names if n.endswith(".xmp")] == [n for n in names if n.endswith(".dng.xmp")]
+    statuses = {
+        Path(r["source_path"]).name: r["status"]
+        for r in q(work, "SELECT source_path, status FROM files WHERE kind='sidecar'")
+    }
+    assert set(statuses.values()) == {"skipped_sidecar"}
+    assert "IMG_0001.THM" in statuses and "mountain.xmp" in statuses
+
+
+def test_copy_sidecars_true_restores_old_behaviour(photo_fixture: Path, tmp_path: Path):
+    work, lib = tmp_path / "work", tmp_path / "library"
+    work.mkdir(parents=True)
+    (work / "photoflow.toml").write_text("copy_sidecars = true\n", encoding="utf-8")
+    pf(work, "scan", str(photo_fixture))
+    pf(work, "plan")
+    pf(work, "apply", "--out", str(lib))
+
+    names = [p.name.lower() for p in lib.rglob("*") if p.is_file()]
+    assert [n for n in names if n.endswith(".thm")]
+    statuses = {r["status"] for r in q(work, "SELECT status FROM files WHERE kind='sidecar'")}
+    assert statuses == {"copied"}

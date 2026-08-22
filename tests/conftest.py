@@ -114,4 +114,14 @@ def photo_fixture(tmp_path: Path) -> Path:
         img.save(p, "JPEG", quality=92)
         _set_exif(p, DateTimeOriginal=f"2015:07:14 12:00:{i * 2:02d}", Model="Canon EOS 70D")
 
+    # camera thumbnail sidecar next to its JPEG (Canon writes .THM beside .CRW/.JPG)
+    _gradient(640, 480, seed=7).save(rnd / "IMG_0001.jpg", "JPEG", quality=92)
+    _gradient(160, 120, seed=8).save(rnd / "IMG_0001.THM", "JPEG", quality=70)
+
+    # pre-existing Lightroom/Capture One sidecar next to the RAW
+    (old / "mountain.xmp").write_text(
+        '<?xpacket begin=""?><x:xmpmeta xmlns:x="adobe:ns:meta/"/><?xpacket end="w"?>',
+        encoding="utf-8",
+    )
+
     return src

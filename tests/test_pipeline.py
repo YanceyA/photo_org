@@ -25,7 +25,8 @@ def test_full_pipeline(photo_fixture: Path, tmp_path: Path):
 
     roles = {r["role"]: r["c"] for r in q(work, "SELECT role, COUNT(*) c FROM files GROUP BY role")}
     assert roles.get("exact_dupe") == 1  # beach copy.jpg
-    assert roles.get("raw_jpeg_pair") == 2  # mountain.jpg + mountain.dng
+    # mountain.jpg + mountain.dng + mountain.xmp (same stem, same folder)
+    assert roles.get("raw_jpeg_pair") == 3
     assert roles.get("burst") == 3  # burst trio kept silently
     assert roles.get("review") == 2  # sunset big + small
 
@@ -64,6 +65,8 @@ def test_full_pipeline(photo_fixture: Path, tmp_path: Path):
     assert not any("sunset-small" in f for f in files)
     assert any("sunset-big" in f for f in files)
     assert any(f.startswith(str(Path("2015"))) and "no-meta" in f for f in files)  # folder-date PNG
+    assert not any(f.lower().endswith(".thm") for f in files)  # sidecars never copied
+    assert not any(f.lower().endswith(".thm.xmp") for f in files)
 
     # XMP description on beach keeper carries BOTH source rel-paths
     beach_path = lib / beach_dests[0]

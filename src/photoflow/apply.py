@@ -62,6 +62,11 @@ def cmd_apply(conn, workdir, run_id, log_fh, args, cfg):
     merge_jobs: list[tuple[int, int]] = []
 
     for r in rows:
+        if not cfg.copy_sidecars and r["kind"] == "sidecar":
+            conn.execute("UPDATE files SET status='skipped_sidecar' WHERE id=?", (r["id"],))
+            log_action(conn, log_fh, run_id, r["id"], "skipped_sidecar", "")
+            skipped += 1
+            continue
         role = r["role"]
         if role == "exact_dupe":
             conn.execute("UPDATE files SET status='skipped_dupe' WHERE id=?", (r["id"],))
